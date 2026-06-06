@@ -1,0 +1,81 @@
+# mini-langgraph-rs
+
+`mini-langgraph-rs` 是一个用 Rust 编写的 `langgraph` mini 实现，目标是构建一个精简、可读、可测试的图执行框架。
+
+本项目当前处于早期阶段，优先复刻 `langgraph` 的核心执行主线，而不是完整兼容 Python 生态或平台能力。
+
+## 项目目标
+
+核心主线：
+
+```text
+StateGraph builder
+  -> nodes / edges / branches
+  -> compile()
+  -> CompiledStateGraph / Pregel
+  -> invoke() / stream()
+```
+
+第一阶段关注：
+
+- 图结构定义
+- 节点注册与执行
+- 普通边与条件边
+- 状态字段更新与 reducer
+- 同步 Pregel 风格运行时
+- 清晰的错误类型与测试覆盖
+
+## 当前状态
+
+项目目前是纯 Rust library crate。源码入口位于：
+
+```text
+src/lib.rs
+```
+
+后续模块会按职责拆分到：
+
+```text
+src/graph/
+src/state/
+src/channel/
+src/runtime/
+src/checkpoint/
+```
+
+其中 `checkpoint` 是后续可恢复执行能力的边界预留，第一阶段不强制实现完整持久化。
+
+## 开发命令
+
+```powershell
+cargo check
+cargo test
+cargo fmt
+cargo clippy --all-targets --all-features
+```
+
+- `cargo check`：快速验证编译。
+- `cargo test`：运行单元测试和集成测试。
+- `cargo fmt`：格式化代码。
+- `cargo clippy --all-targets --all-features`：运行 lint 检查。
+
+## 文档
+
+项目背景与实现范围位于 `docs/doc`：
+
+- [项目背景](docs/doc/project_background.md)
+- [核心构图 API](docs/doc/implementation_scope_core_graph.md)
+- [状态、channel 与 reducer](docs/doc/implementation_scope_state_channels.md)
+- [同步 Pregel 运行时](docs/doc/implementation_scope_runtime.md)
+- [可恢复执行与持久化取舍](docs/doc/implementation_scope_persistence.md)
+- [暂不实现范围](docs/doc/implementation_scope_out_of_scope.md)
+
+## 参考项目
+
+原始参考项目为 `langgraph`。本地参考路径：
+
+```text
+E:\codes\Python\langgraph
+```
+
+实现时应参考其核心行为和命名，但 Rust 版本应保持符合 Rust 习惯，避免为了兼容完整 Python API 而过早引入复杂抽象。
