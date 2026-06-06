@@ -1,0 +1,10 @@
+[package]
+name = "mini-langgraph-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thiserror = "2"
+
+[dev-dependencies]
+pretty_assertions = "1"
