@@ -33,17 +33,23 @@ StateGraph builder
 src/lib.rs
 ```
 
-后续模块会按职责拆分到：
+当前已经开始按职责拆分模块骨架：
 
 ```text
-src/graph/
-src/state/
-src/channel/
-src/runtime/
-src/checkpoint/
+src/graph/      # StateGraph、节点规格与 START / END 常量
+src/runtime/    # 节点执行上下文 NodeContext
+src/error.rs    # 图构建与运行时错误类型边界
 ```
 
-其中 `checkpoint` 是后续可恢复执行能力的边界预留，第一阶段不强制实现完整持久化。
+后续仍会继续补充：
+
+```text
+src/state/      # 状态 update、字段合并和 reducer 协议
+src/channel/    # LastValue、BinaryOperatorAggregate、EphemeralValue、barrier 等 channel
+src/checkpoint/ # 可恢复执行能力的边界预留
+```
+
+当前代码仍处于骨架阶段，`add_node`、`compile`、`invoke`、`stream` 和 channel 合并逻辑尚未实现。
 
 ## 开发命令
 

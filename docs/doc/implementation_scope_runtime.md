@@ -24,6 +24,18 @@
 - 基础递归/步数限制，防止无限循环。
 - 明确的运行时错误类型，例如缺失节点、重复节点、非法边、无入口、无终点、非法更新。
 
+## 当前代码状态
+
+- `src/runtime/mod.rs` 已开始定义 `NodeContext<ContextT>`，当前只包含用户运行上下文 `context: ContextT`。
+- 节点函数签名已经预留 `&mut NodeContext<ContextT>` 参数，用于后续承载 runtime、config、writer、store、执行元数据等运行时信息。
+- `src/error.rs` 已预留 `GraphError` 类型边界，但错误枚举项尚未细化。
+
+## 当前未完成
+
+- `CompiledStateGraph` / `Pregel` 运行时尚未实现。
+- `invoke`、`stream`、superstep 调度、写入收集和下一轮可见性尚未实现。
+- `NodeOutput::Command` 的运行时解释尚未实现。
+
 ## 暂缓
 
 - async 执行接口。
