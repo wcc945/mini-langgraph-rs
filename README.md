@@ -36,8 +36,8 @@ src/lib.rs
 当前已经开始按职责拆分模块骨架：
 
 ```text
-src/graph/      # StateGraph、节点规格与 START / END 常量
-src/runtime/    # 节点执行上下文 NodeContext
+src/graph/      # StateGraph、节点、条件边、waiting edge 与 START / END 常量
+src/runtime/    # 节点执行上下文 RuntimeContext
 src/error.rs    # 图构建与运行时错误类型边界
 ```
 
@@ -45,7 +45,6 @@ src/error.rs    # 图构建与运行时错误类型边界
 
 ```text
 src/state/      # 状态 update、字段合并和 reducer 协议
-src/channel/    # LastValue、BinaryOperatorAggregate、EphemeralValue、barrier 等 channel
 src/checkpoint/ # 可恢复执行能力的边界预留
 ```
 
@@ -75,6 +74,7 @@ cargo clippy --all-targets --all-features
 - [同步 Pregel 运行时](docs/doc/implementation_scope_runtime.md)
 - [可恢复执行与持久化取舍](docs/doc/implementation_scope_persistence.md)
 - [暂不实现范围](docs/doc/implementation_scope_out_of_scope.md)
+- [Rust 版相对源项目的改进记录](docs/doc/rust_improvements_over_original.md)
 
 ## 参考项目
 

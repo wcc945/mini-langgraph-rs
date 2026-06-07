@@ -1,3 +1,3 @@
-pub struct NodeContext<ContextT> {
+pub struct RuntimeContext<ContextT> {
     pub context: ContextT,
 }

@@ -1,5 +1,5 @@
 use crate::error::GraphError;
-use crate::runtime::NodeContext;
+use crate::runtime::RuntimeContext;
 
 struct Command<UpdateT> {
     temp: UpdateT,
@@ -12,7 +12,7 @@ enum NodeOutput<UpdateT> {
 }
 
 type NodeFn<NodeInputT, UpdateT, ContextT> = Box<
-    dyn Fn(&NodeInputT, &mut NodeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>
+    dyn Fn(&NodeInputT, &mut RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>
         + Send
         + Sync
         + 'static,

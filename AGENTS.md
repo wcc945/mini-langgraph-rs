@@ -31,6 +31,12 @@
 
 本项目是 `langgraph` 的 mini Rust 实现。修改图构建、节点执行、边语义、状态更新或运行时行为前，必须阅读 `docs/doc/project_background.md`。原始参考项目位于本地路径：`E:\codes\Python\langgraph`。
 
+## 文档同步要求
+
+涉及相对 Python 源项目的 Rust 化改进、语义差异或有意取舍时，必须同步更新 `docs/doc/rust_improvements_over_original.md`。例如所有权限制 builder 编译后修改、节点统一执行签名、join 边规范化、动态 channel 表、managed value trait 边界、暂不迁移 `schemas` 等设计变化，都应记录原因、源项目行为和 Rust 版取舍。
+
+修改图构建、状态更新、channel、managed value、运行时或 checkpoint 相关行为后，还应检查 `docs/doc` 下对应实现范围文档是否需要同步更新。
+
 ## 测试规范
 
 项目使用 Rust 内置测试框架。单元测试应放在被测代码旁的 `#[cfg(test)] mod tests` 中；端到端测试或公共 API 行为测试放在 `tests/` 下。
