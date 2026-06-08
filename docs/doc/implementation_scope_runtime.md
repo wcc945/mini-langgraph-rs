@@ -28,7 +28,8 @@
 
 - `src/runtime/mod.rs` 已开始定义 `RuntimeContext<ContextT>`，当前只包含用户运行上下文 `context: ContextT`。
 - 节点函数签名已经预留 `&mut RuntimeContext<ContextT>` 参数，用于后续承载 runtime、config、writer、store、执行元数据等运行时信息。
-- `src/error.rs` 已预留 `GraphError` 类型边界，但错误枚举项尚未细化。
+- `src/error.rs` 已定义公共 `GraphError` 类型，当前覆盖 channel 空读、分支解析错误和构图阶段的基础结构错误。
+- 已为 `RuntimeContext` 用户上下文字段和 `GraphError` 展示文本补充基础单元测试。
 
 ## 当前未完成
 

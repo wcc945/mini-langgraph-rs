@@ -27,7 +27,14 @@
 
 - `src/graph/mod.rs` 已作为 graph 模块入口，声明 `state`、`node`、`branch`、`waiting_edge` 子模块，并导出 `StateGraph`、`WaitingEdgeSpec`、`START`、`END`。
 - `src/graph/state.rs` 已开始定义 `StateGraph<StateT, UpdateT, ContextT, InputT, OutputT>` 骨架，当前保存 `nodes`、`edges`、`branches`、`waiting_edges`、`channels`、`managed`，并用 `PhantomData<(InputT, OutputT)>` 保留 input/output 类型占位。
-- `StateGraph` 已实现 `new()` 和 `Default`，用于创建空 builder；暂不接收 Python 版 `state_schema/context_schema/input_schema/output_schema` 参数。
+- `StateGraph` 已实现 `add_node`、`add_edge` 和 `add_conditional_edges` 的基础 builder API；节点名、边端点和条件分支名使用 `impl Into<String>` 风格的公共入参，内部统一收敛为 `String`。
+- `add_edge` 当前通过 `IntoEdgeStarts` 接收单个起点或多个起点：单起点写入普通 `edges`，多起点写入 `waiting_edges`，并保留 `START` / `END` 的基本方向校验。
+- `add_conditional_edges` 当前要求显式传入分支名，不尝试像 Python 版一样从函数对象推断名称。
+- `StateGraph` 已实现 `add_sequence`、`set_entry_point`、`set_conditional_entry_point` 和 `set_finish_point` 的 MVP 版：它们仅作为已有 builder API 的薄封装，不引入自动节点名推断或 Python Runnable 适配。
+- `StateGraph` 已实现 `validate` 的 MVP 版：校验所有边和条件分支的起点/终点是否存在，并要求图至少有一个从 `START` 出发的入口。
+- 构图 API 和 `validate` 已统一返回 `GraphError`，避免使用散落的字符串错误；`GraphError` 当前包含重复节点、保留节点名、未知节点、非法边端点、重复分支、缺少入口和未知分支目标等构图错误。
+- 已为核心构图模块补充单元测试，覆盖 `BranchSpec::resolve`、`WaitingEdgeSpec` 起点归一化、`StateNodeSpec` runnable 保存和执行、`StateGraph` builder 成功路径、错误路径与 `validate` 校验。
+- `StateGraph` 已实现 `new()`，用于创建空 builder；暂不接收 Python 版 `state_schema/context_schema/input_schema/output_schema` 参数。
 - `src/graph/node.rs` 已开始定义节点执行层骨架：`NodeFn<NodeInputT, UpdateT, ContextT>` 使用统一签名 `(&NodeInputT, &mut RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>`。
 - `NodeOutput<UpdateT>` 当前设计为支持普通 `Update(UpdateT)`、`Command(Command<UpdateT>)`、多个 `Commands(Vec<Command<UpdateT>>)` 和 `None`。
 - `StateNodeSpec<NodeInputT, UpdateT, ContextT>` 当前仅保存 `runnable`，暂不包含源项目中的 `metadata`、`input_schema`、`retry_policy`、`cache_policy`、`timeout` 等策略字段。
@@ -35,11 +42,11 @@
 
 ## 当前未完成
 
-- `StateGraph` 还没有 `add_node`、`add_edge`、`add_conditional_edges`、`compile` 等 builder 方法。
+- `StateGraph` 还没有 `compile` builder 方法；后续 `compile` 应调用现有 `validate` 作为基础图结构校验。
 - `Command<UpdateT>` 当前只是返回值结构方向，`goto`、父图跳转、动态控制流等执行语义尚未实现。
-- `BranchSpec` 当前已有 route 目标解析骨架，但还未接入 `add_conditional_edges`、Pregel 写入和运行时调度。
+- `BranchSpec` 当前已有 route 目标解析骨架，并已接入 `add_conditional_edges` 的 builder 存储；但还未接入 Pregel 写入和运行时调度。
 - `CompiledStateGraph` 和运行时调度结构尚未实现。
-- `WaitingEdgeSpec` 目前只是结构定义，还未接入 `add_edge(list, end)`、barrier channel 或 Pregel 调度。
+- `WaitingEdgeSpec` 已接入多起点 `add_edge` 的 builder 存储，但还未接入 barrier channel 或 Pregel 调度。
 
 ## 暂缓
 

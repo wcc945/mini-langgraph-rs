@@ -4,20 +4,47 @@ use crate::runtime::RuntimeContext;
 struct Command<UpdateT> {
     temp: UpdateT,
 }
-enum NodeOutput<UpdateT> {
+pub enum NodeOutput<UpdateT> {
     Update(UpdateT),
     Command(Command<UpdateT>),
     Commands(Vec<Command<UpdateT>>),
     None,
 }
 
-type NodeFn<NodeInputT, UpdateT, ContextT> = Box<
-    dyn Fn(&NodeInputT, &mut RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>
+pub type NodeFn<StateT, UpdateT, ContextT> = Box<
+    dyn Fn(&StateT, &mut RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>
         + Send
         + Sync
         + 'static,
 >;
 
-pub struct StateNodeSpec<NodeInputT, UpdateT, ContextT> {
-    pub runnable: NodeFn<NodeInputT, UpdateT, ContextT>,
+pub struct StateNodeSpec<StateT, UpdateT, ContextT> {
+    pub runnable: NodeFn<StateT, UpdateT, ContextT>,
+}
+
+impl<StateT, UpdateT, ContextT> StateNodeSpec<StateT, UpdateT, ContextT> {
+    pub fn new(runnable: NodeFn<StateT, UpdateT, ContextT>) -> Self {
+        Self { runnable }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_node_spec_stores_and_runs_node_function() {
+        let spec = StateNodeSpec::new(Box::new(
+            |state: &i32, context: &mut RuntimeContext<i32>| {
+                context.context += 1;
+                Ok(NodeOutput::Update(*state + context.context))
+            },
+        ));
+        let mut context = RuntimeContext { context: 2 };
+
+        let output = (spec.runnable)(&5, &mut context).unwrap();
+
+        assert_eq!(context.context, 3);
+        assert!(matches!(output, NodeOutput::Update(8)));
+    }
 }
