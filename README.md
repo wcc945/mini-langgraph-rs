@@ -37,6 +37,7 @@ src/lib.rs
 
 ```text
 src/graph/      # StateGraph、节点、条件边、waiting edge 与 START / END 常量
+src/channel/    # BaseChannel、StateValue、基础 channel 与 ChannelWriter 写入组装
 src/runtime/    # 节点执行上下文 RuntimeContext
 src/error.rs    # 图构建与运行时错误类型边界
 ```
@@ -48,7 +49,7 @@ src/state/      # 状态 update、字段合并和 reducer 协议
 src/checkpoint/ # 可恢复执行能力的边界预留
 ```
 
-当前代码仍处于骨架阶段，`add_node`、`compile`、`invoke`、`stream` 和 channel 合并逻辑尚未实现。
+当前代码仍处于骨架阶段，`add_node`、`compile`、`invoke` 和 `stream` 尚未实现。channel 侧已具备 `LastValue`、`BinaryOperatorAggregate`、`EphemeralValue`、`NamedBarrierValue` 和 `ChannelWriter::assemble` 的 MVP；后续 runtime 仍需把 task writes 按 channel 聚合并调用 channel `update(values)`。
 
 ## 开发命令
 
