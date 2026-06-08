@@ -29,12 +29,13 @@
 - `src/runtime/mod.rs` 已开始定义 `RuntimeContext<ContextT>`，当前只包含用户运行上下文 `context: ContextT`。
 - 节点函数签名已经预留 `&mut RuntimeContext<ContextT>` 参数，用于后续承载 runtime、config、writer、store、执行元数据等运行时信息。
 - `src/error.rs` 已定义公共 `GraphError` 类型，当前覆盖 channel 空读、分支解析错误和构图阶段的基础结构错误。
+- channel 写入层已具备 `ChannelWriter::assemble`，后续 task 执行节点后应调用节点 writers，把组装出的 `(channel, StateValue)` 追加到 task writes；runtime 的 Update 阶段再统一按 channel 聚合同轮 writes，调用对应 channel 的 `update(values)`，并依据返回值维护 changed channel 集合。
 - 已为 `RuntimeContext` 用户上下文字段和 `GraphError` 展示文本补充基础单元测试。
 
 ## 当前未完成
 
 - `CompiledStateGraph` / `Pregel` 运行时尚未实现。
-- `invoke`、`stream`、superstep 调度、写入收集和下一轮可见性尚未实现。
+- `invoke`、`stream`、superstep 调度、节点写入收集和下一轮可见性尚未实现。
 - `NodeOutput::Command` 的运行时解释尚未实现。
 
 ## 暂缓

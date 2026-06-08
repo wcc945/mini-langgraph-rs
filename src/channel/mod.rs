@@ -16,6 +16,7 @@ pub(crate) type DynChannel =
     dyn BaseChannel<Value = StateValue, Update = StateValue, Checkpoint = StateValue>;
 
 pub(crate) mod binop;
+pub(crate) mod channel_writer;
 pub(crate) mod ephemeral_value;
 pub(crate) mod last_value;
 pub(crate) mod named_barrier_value;

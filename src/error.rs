@@ -9,6 +9,9 @@ pub enum GraphError {
     #[error("invalid channel update: {0}")]
     InvalidChannelUpdate(String),
 
+    #[error("passthrough write is not allowed")]
+    PassthroughNotAllowed,
+
     #[error("invalid barrier value: {0}")]
     InvalidBarrierValue(String),
 

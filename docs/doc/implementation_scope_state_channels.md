@@ -28,13 +28,16 @@
 - 已为 `BaseChannel` 的默认行为补充测试：使用测试专用 channel 覆盖 `copy` 从 checkpoint 重建、`is_available` 基于 `get` 结果判断、`update` 写入最新值，以及默认 `consume` / `finish` no-op 语义。
 - 已实现 `LastValue`、`BinaryOperatorAggregate`、`EphemeralValue` 和 `NamedBarrierValue` 的 MVP 版，并补充单元测试覆盖空读、更新、checkpoint/copy、consume、reducer 错误和 barrier 非法值。
 - 为了让不同字段的 channel 能放入同一个 `HashMap`，当前引入动态值 `StateValue`，并定义 `DynChannel = dyn BaseChannel<Value = StateValue, Update = StateValue, Checkpoint = StateValue>`。
+- 已实现 `ChannelWriter` MVP（`src/channel/channel_writer.rs`），用于把节点输出 `StateValue` 组装成待追加到 task writes 的 `(channel, StateValue)` 项，不直接更新 channel 表。
+- `ChannelWriter::assemble` 支持单 channel 的 `ChannelWriteEntry` 和多 channel 的 `ChannelWriteTupleEntry`：前者可处理固定值、passthrough 输出、mapper 转换、`SkipWrite` 和 `skip_none`；后者可把一个输出值展开为多条 channel writes，对应源项目 `_get_updates` / `_control_branch` 一类 tuple mapper 语义。
+- `ChannelWriter::state_value` 提供最小 `Into<StateValue>` 转换入口，并支持 `bool`、数字、字符串、列表和 `HashMap<String, T>` 等常见 Rust 值转为 `StateValue`；暂不把 `Option<T>` 自动转为 `StateValue`，避免混淆 `None = 不写字段` 与显式 `StateValue::Null`。
 - `StateGraph` 当前的 channel 表使用 `channels: HashMap<String, Box<DynChannel>>`，对应源项目 `channels: dict[str, BaseChannel]` 的动态类型路线。
 - `src/managed/mod.rs` 已新增最小 `ManagedValueSpec` trait，`StateGraph` 已包含 `managed: HashMap<String, Box<dyn ManagedValueSpec>>`，对应源项目 `managed: dict[str, ManagedValueSpec]`；字段名保存在 `HashMap` key 中，spec 表示 managed value 的计算规格。
 - 已为 `ManagedValueSpec` 补充 marker trait 边界测试，确保测试实现满足 `Send + Sync` 约束。
 - `GraphError` 已补充 `EmptyChannel`、多值写入、非法 channel update 和非法 barrier value 等错误，用于 channel 读取空值和更新失败时返回结构化错误。
 - 节点返回的局部更新暂由泛型 `UpdateT` 表达，框架还没有固定内置 `Update` 结构。
 - `NodeOutput<UpdateT>` 把“状态更新”与“节点完整返回值”分开：`UpdateT` 只表示局部状态更新，`Command<UpdateT>` 可在后续携带 update 与控制流信息。
-- 当前还没有实现将 `UpdateT` 拆分为字段级 writes 的 trait、动态 map、宏生成 partial update 或 channel 合并逻辑。
+- 当前还没有实现将 `UpdateT` 拆分为字段级 writes 的 trait、动态 map 或宏生成 partial update；已有 `ChannelWriter` 可组装 writer entries 产生 pending writes，真正的 channel 合并仍应由后续 runtime Update 阶段负责。
 
 ## 当前未完成
 

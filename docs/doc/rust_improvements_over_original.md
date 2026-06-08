@@ -180,7 +180,23 @@ managed
 
 等后续出现独立 `InputT`、`OutputT`、节点输入投影或宏生成 schema 时，再设计 Rust 版 `SchemaSpec` 或 `StateSchema` trait。
 
-## 10. 错误类型集中到 GraphError
+## 10. ChannelWriter 先收敛为同步字段写入层
+
+源项目 Pregel 写入路径包含 `ChannelWriteEntry`、`ChannelWriteTupleEntry`、`Send`、`TASKS`、`RunnableCallable` 包装、async writer 和静态写入分析等能力，用于同时覆盖状态字段写入、任务发送和复杂 runnable 组合。
+
+Rust 版当前先实现 `ChannelWriter` MVP：
+
+```rust
+struct ChannelWriter {
+    entries: Vec<ChannelWriterEntry>,
+}
+```
+
+它只负责把节点输出 `StateValue`、固定值或 mapper 结果组装为 `(channel, StateValue)` pending writes，不直接更新 `HashMap<String, Box<DynChannel>>`。单 channel 写入由 `ChannelWriteEntry` 表达，多 channel 展开由 `ChannelWriteTupleEntry` 表达；后者对应源项目中 `_get_updates`、`_control_branch` 这类把一个输出值展开为多条 writes 的 mapper。
+
+这个取舍保留了源项目“writer 产出 task writes，Update 阶段再统一应用到 channel”的核心语义，但不复制 Python 的 `RunnableCallable`、config side effect、async writer、`Send` / `TASKS` 和静态写入分析。后续 runtime 接入时应让 task 调用节点 writers 的 `assemble`，再由独立 Update 算法按 channel 聚合并调用 `BaseChannel::update(values)`。
+
+## 11. 错误类型集中到 GraphError
 
 源项目在不同位置抛出 `ValueError`、`InvalidUpdateError`、`EmptyChannelError` 等异常。Rust 版当前统一预留 `GraphError` 作为图构建、channel 和运行时错误边界。
 
