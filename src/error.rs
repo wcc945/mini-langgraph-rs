@@ -3,6 +3,15 @@ pub enum GraphError {
     #[error("channel is empty")]
     EmptyChannel,
 
+    #[error("can receive only one value per step, got {count}")]
+    MultipleUpdatesWithoutReducer { count: usize },
+
+    #[error("invalid channel update: {0}")]
+    InvalidChannelUpdate(String),
+
+    #[error("invalid barrier value: {0}")]
+    InvalidBarrierValue(String),
+
     #[error("invalid branch target `{0}`")]
     InvalidBranchTarget(String),
 

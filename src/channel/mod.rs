@@ -15,6 +15,11 @@ pub(crate) enum StateValue {
 pub(crate) type DynChannel =
     dyn BaseChannel<Value = StateValue, Update = StateValue, Checkpoint = StateValue>;
 
+pub(crate) mod binop;
+pub(crate) mod ephemeral_value;
+pub(crate) mod last_value;
+pub(crate) mod named_barrier_value;
+
 pub(crate) trait BaseChannel {
     type Value;
     type Update;
@@ -28,12 +33,12 @@ pub(crate) trait BaseChannel {
     where
         Self: Sized,
     {
-        Self::from_checkpoint(self.checkpoint()?)
+        self.from_checkpoint(self.checkpoint()?)
     }
 
     fn checkpoint(&self) -> Result<Option<Self::Checkpoint>, GraphError>;
 
-    fn from_checkpoint(checkpoint: Option<Self::Checkpoint>) -> Result<Self, GraphError>
+    fn from_checkpoint(&self, checkpoint: Option<Self::Checkpoint>) -> Result<Self, GraphError>
     where
         Self: Sized;
 
@@ -80,7 +85,10 @@ mod tests {
             Ok(self.value.clone())
         }
 
-        fn from_checkpoint(checkpoint: Option<Self::Checkpoint>) -> Result<Self, GraphError> {
+        fn from_checkpoint(
+            &self,
+            checkpoint: Option<Self::Checkpoint>,
+        ) -> Result<Self, GraphError> {
             Ok(Self { value: checkpoint })
         }
 

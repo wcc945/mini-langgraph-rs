@@ -95,6 +95,14 @@ trait BaseChannel {
 
 这表达“某个具体 channel 自身固定一组 `Value/Update/Checkpoint` 类型”，比把这些类型作为调用方传入的 trait 泛型更贴合 Rust 模型。
 
+Rust 版还把 `from_checkpoint` 设计为接收 `&self`：
+
+```rust
+fn from_checkpoint(&self, checkpoint: Option<Self::Checkpoint>) -> Result<Self, GraphError>
+```
+
+这让 `BinaryOperatorAggregate` 这类带 reducer 配置的 channel 能复用原实例中的 reducer，再恢复 checkpoint 值；也让 barrier channel 能保留预设名称集合。源项目依赖 Python 对象实例保存这些配置，Rust 版显式体现在 trait 方法签名中。
+
 ## 7. 动态 channel map 显式擦除为 StateValue
 
 Python 源项目可以直接保存：
@@ -176,14 +184,19 @@ managed
 
 源项目在不同位置抛出 `ValueError`、`InvalidUpdateError`、`EmptyChannelError` 等异常。Rust 版当前统一预留 `GraphError` 作为图构建、channel 和运行时错误边界。
 
-当前已有：
+当前已有的错误覆盖 channel、branch 和构图阶段，例如：
 
 ```rust
 EmptyChannel
 InvalidBranchTarget(String)
+MultipleUpdatesWithoutReducer { count }
+InvalidChannelUpdate(String)
+InvalidBarrierValue(String)
+DuplicateNode(String)
+MissingEntrypoint
 ```
 
-后续新增节点重复、非法边、缺失入口、非法 update 等错误时，应继续集中到 `GraphError`，让 API 返回 `Result<_, GraphError>`。
+后续新增运行时调度、状态合并或 checkpoint 错误时，也应继续集中到 `GraphError`，让 API 返回 `Result<_, GraphError>`。
 
 ## 当前仍需谨慎的地方
 
