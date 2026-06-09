@@ -1,8 +1,11 @@
 mod branch;
+mod compiled;
 pub mod consts;
 pub(crate) mod node;
+mod schema;
 mod state;
 mod waiting_edge;
 
+pub use compiled::CompiledStateGraph;
 pub use state::{IntoEdgeStarts, StateGraph};
 pub use waiting_edge::WaitingEdgeSpec;

@@ -1,8 +1,11 @@
 use crate::channel::DynChannel;
+use crate::channel::ephemeral_value::EphemeralValue;
 use crate::error::GraphError;
 use crate::graph::branch::{BranchPathFn, BranchSpec};
+use crate::graph::compiled::CompiledStateGraph;
 use crate::graph::consts::{END, RESERVED, START};
 use crate::graph::node::{NodeFn, StateNodeSpec};
+use crate::graph::schema::StateSchema;
 use crate::graph::waiting_edge::WaitingEdgeSpec;
 use crate::managed::ManagedValueSpec;
 use std::collections::{HashMap, HashSet};
@@ -65,6 +68,20 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
             managed: HashMap::new(),
             _marker: PhantomData,
         }
+    }
+}
+
+#[allow(private_bounds)]
+impl<StateT, UpdateT, ContextT, InputT, OutputT>
+    StateGraph<StateT, UpdateT, ContextT, InputT, OutputT>
+where
+    StateT: StateSchema,
+{
+    pub(crate) fn with_schema() -> Self {
+        let mut graph = Self::new();
+        graph.channels = StateT::channels();
+        graph.managed = StateT::managed();
+        graph
     }
 }
 
@@ -214,6 +231,51 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
         self.add_edge(key.into(), END)
     }
 
+    pub fn compile(
+        self,
+    ) -> Result<CompiledStateGraph<StateT, UpdateT, ContextT, InputT, OutputT>, GraphError> {
+        self.validate()?;
+
+        let StateGraph {
+            nodes,
+            edges,
+            branches,
+            waiting_edges,
+            mut channels,
+            managed,
+            _marker: _,
+        } = self;
+
+        let output_channels = if channels.is_empty() {
+            vec![START.to_string()]
+        } else {
+            channels.keys().cloned().collect()
+        };
+
+        channels
+            .entry(START.to_string())
+            .or_insert_with(|| Box::new(EphemeralValue::new(false)) as Box<DynChannel>);
+
+        let mut compiled = CompiledStateGraph::new(channels, managed, output_channels);
+
+        for (name, node) in nodes {
+            compiled.attach_node(name, node);
+        }
+        for (start, end) in &edges {
+            compiled.attach_edge(vec![start.clone()], end);
+        }
+        for waiting_edge in &waiting_edges {
+            compiled.attach_edge(waiting_edge.starts.clone(), &waiting_edge.end);
+        }
+        for (start, branches) in branches {
+            for (name, branch) in branches {
+                compiled.attach_branch(&start, &name, branch)?;
+            }
+        }
+
+        compiled.validate()
+    }
+
     /// 校验当前 builder 中保存的图结构是否合法。
     ///
     /// MVP 版只检查核心构图约束：所有边和条件分支的起点必须是已注册节点或 `START`，
@@ -288,7 +350,37 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel::last_value::LastValue;
     use crate::graph::node::NodeOutput;
+    use crate::managed::ManagedValueSpec;
+
+    struct TestManagedValue;
+
+    impl ManagedValueSpec for TestManagedValue {}
+
+    struct TestSchema;
+
+    impl StateSchema for TestSchema {
+        fn channels() -> HashMap<String, Box<DynChannel>> {
+            HashMap::from([
+                (
+                    "left".to_string(),
+                    Box::new(LastValue::new()) as Box<DynChannel>,
+                ),
+                (
+                    "right".to_string(),
+                    Box::new(LastValue::new()) as Box<DynChannel>,
+                ),
+            ])
+        }
+
+        fn managed() -> HashMap<String, Box<dyn ManagedValueSpec>> {
+            HashMap::from([(
+                "runtime".to_string(),
+                Box::new(TestManagedValue) as Box<dyn ManagedValueSpec>,
+            )])
+        }
+    }
 
     fn noop_node() -> NodeFn<i32, i32, ()> {
         Box::new(|_, _| Ok(NodeOutput::None))
@@ -296,6 +388,13 @@ mod tests {
 
     fn route_path() -> BranchPathFn<i32, ()> {
         Box::new(|_, _| Some("next".to_string()))
+    }
+
+    fn expect_compile_error<T>(result: Result<T, GraphError>) -> GraphError {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("compile should fail"),
+        }
     }
 
     #[test]
@@ -380,6 +479,243 @@ mod tests {
             .unwrap();
 
         assert!(graph.validate().is_err());
+    }
+
+    #[test]
+    fn compile_consumes_builder_and_returns_compiled_graph() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+
+        graph.add_node("a", noop_node()).unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph.set_finish_point("a").unwrap();
+
+        let compiled = graph.compile().unwrap();
+
+        assert!(compiled.pregel.nodes.contains_key("a"));
+    }
+
+    #[test]
+    fn compile_runs_state_graph_validation() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+
+        graph.add_node("a", noop_node()).unwrap();
+
+        let error = expect_compile_error(graph.compile());
+
+        assert!(matches!(error, GraphError::MissingEntrypoint));
+    }
+
+    #[test]
+    fn compile_builds_start_trigger_for_entrypoint() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+
+        graph.add_node("a", noop_node()).unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph.set_finish_point("a").unwrap();
+
+        let compiled = graph.compile().unwrap();
+        let node = compiled.pregel.nodes.get("a").unwrap();
+
+        assert!(node.triggers.contains(&START.to_string()));
+        assert!(compiled.pregel.channels.contains_key(START));
+    }
+
+    #[test]
+    fn compile_attach_node_builds_branch_trigger_channel() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+
+        graph.add_node("a", noop_node()).unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph.set_finish_point("a").unwrap();
+
+        let compiled = graph.compile().unwrap();
+        let node = compiled.pregel.nodes.get("a").unwrap();
+
+        assert!(node.triggers.contains(&"branch:to:a".to_string()));
+        assert!(compiled.pregel.channels.contains_key("branch:to:a"));
+    }
+
+    #[test]
+    fn compile_attach_node_reads_state_channels_and_managed_values() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+
+        graph
+            .channels
+            .insert("left".to_string(), Box::new(LastValue::new()));
+        graph
+            .channels
+            .insert("right".to_string(), Box::new(LastValue::new()));
+        graph
+            .managed
+            .insert("runtime".to_string(), Box::new(TestManagedValue));
+        graph.add_node("a", noop_node()).unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph.set_finish_point("a").unwrap();
+
+        let compiled = graph.compile().unwrap();
+        let node = compiled.pregel.nodes.get("a").unwrap();
+
+        assert_eq!(
+            node.channels,
+            vec![
+                "left".to_string(),
+                "right".to_string(),
+                "runtime".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_attach_node_installs_state_writer() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+
+        graph
+            .channels
+            .insert("value".to_string(), Box::new(LastValue::new()));
+        graph.add_node("a", noop_node()).unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph.set_finish_point("a").unwrap();
+
+        let compiled = graph.compile().unwrap();
+        let node = compiled.pregel.nodes.get("a").unwrap();
+
+        assert_eq!(node.writers.len(), 1);
+    }
+
+    #[test]
+    fn compile_sets_stream_channels_to_output_channels() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+
+        graph
+            .channels
+            .insert("value".to_string(), Box::new(LastValue::new()));
+        graph.add_node("a", noop_node()).unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph.set_finish_point("a").unwrap();
+
+        let compiled = graph.compile().unwrap();
+
+        assert_eq!(
+            compiled.pregel.stream_channels,
+            Some(compiled.pregel.output_channels.clone())
+        );
+    }
+
+    #[test]
+    fn with_schema_adds_state_channels() {
+        let mut graph: StateGraph<TestSchema, i32> = StateGraph::with_schema();
+
+        graph
+            .add_node("a", Box::new(|_, _| Ok(NodeOutput::None)))
+            .unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph.set_finish_point("a").unwrap();
+
+        let compiled = graph.compile().unwrap();
+        let node = compiled.pregel.nodes.get("a").unwrap();
+
+        assert!(node.channels.contains(&"left".to_string()));
+        assert!(node.channels.contains(&"right".to_string()));
+        assert_eq!(compiled.pregel.output_channels.len(), 2);
+    }
+
+    #[test]
+    fn with_schema_adds_managed_values() {
+        let mut graph: StateGraph<TestSchema, i32> = StateGraph::with_schema();
+
+        graph
+            .add_node("a", Box::new(|_, _| Ok(NodeOutput::None)))
+            .unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph.set_finish_point("a").unwrap();
+
+        let compiled = graph.compile().unwrap();
+        let node = compiled.pregel.nodes.get("a").unwrap();
+
+        assert!(node.channels.contains(&"runtime".to_string()));
+        assert!(compiled.pregel.managed.contains_key("runtime"));
+    }
+
+    #[test]
+    fn new_keeps_empty_schema_tables() {
+        let graph: StateGraph<TestSchema, i32> = StateGraph::new();
+
+        assert!(graph.channels.is_empty());
+        assert!(graph.managed.is_empty());
+    }
+
+    #[test]
+    fn compile_builds_target_trigger_for_regular_edge() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+
+        graph.add_node("a", noop_node()).unwrap();
+        graph.add_node("b", noop_node()).unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph.add_edge("a", "b").unwrap();
+        graph.set_finish_point("b").unwrap();
+
+        let compiled = graph.compile().unwrap();
+        let node = compiled.pregel.nodes.get("b").unwrap();
+
+        assert_eq!(node.triggers, vec!["branch:to:b".to_string()]);
+        assert!(compiled.pregel.channels.contains_key("branch:to:b"));
+        assert_eq!(compiled.pregel.nodes.get("a").unwrap().writers.len(), 2);
+    }
+
+    #[test]
+    fn compile_does_not_trigger_end_node() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+
+        graph.add_node("a", noop_node()).unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph.set_finish_point("a").unwrap();
+
+        let compiled = graph.compile().unwrap();
+
+        assert!(!compiled.pregel.nodes.contains_key(END));
+        assert!(
+            compiled
+                .pregel
+                .nodes
+                .values()
+                .all(|node| !node.triggers.iter().any(|trigger| trigger == END))
+        );
+    }
+
+    #[test]
+    fn compile_rejects_branches_for_now() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+        let ends = HashMap::from([("next".to_string(), "a".to_string())]);
+
+        graph.add_node("a", noop_node()).unwrap();
+        graph
+            .set_conditional_entry_point("route", route_path(), ends)
+            .unwrap();
+        graph.set_finish_point("a").unwrap();
+
+        let error = expect_compile_error(graph.compile());
+
+        assert!(matches!(error, GraphError::UnsupportedCompiledBranches));
+    }
+
+    #[test]
+    fn compile_attaches_waiting_edge_starts_for_now() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+
+        graph.add_node("a", noop_node()).unwrap();
+        graph.add_node("b", noop_node()).unwrap();
+        graph.add_node("c", noop_node()).unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph.add_edge(["a", "b"], "c").unwrap();
+        graph.set_finish_point("c").unwrap();
+
+        let compiled = graph.compile().unwrap();
+        let node = compiled.pregel.nodes.get("c").unwrap();
+
+        assert!(node.triggers.contains(&"join:a+b:c".to_string()));
+        assert!(compiled.pregel.channels.contains_key("join:a+b:c"));
+        assert_eq!(compiled.pregel.nodes.get("a").unwrap().writers.len(), 2);
+        assert_eq!(compiled.pregel.nodes.get("b").unwrap().writers.len(), 2);
     }
 
     #[test]

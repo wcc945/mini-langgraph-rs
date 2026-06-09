@@ -84,6 +84,9 @@ pub enum GraphError {
 
     #[error("Pregel recursion limit must be greater than 0, got {0}")]
     InvalidPregelRecursionLimit(usize),
+
+    #[error("compile does not support conditional branches yet")]
+    UnsupportedCompiledBranches,
 }
 
 #[cfg(test)]

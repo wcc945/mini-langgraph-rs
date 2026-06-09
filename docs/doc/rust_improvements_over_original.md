@@ -8,7 +8,7 @@
 
 源项目通过 `compiled: bool` 记录 builder 是否已经编译。编译后继续调用 `add_node`、`add_edge` 等方法时，Python 版本通常只能发出 warning。
 
-Rust 版计划不保留 `compiled: bool`，而是让后续 `compile(self)` 消费 `StateGraph`：
+Rust 版不保留 `compiled: bool`，而是让 `compile(self)` 消费 `StateGraph`：
 
 ```rust
 pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
@@ -167,18 +167,22 @@ managed: HashMap<String, Box<dyn ManagedValueSpec>>
 
 这避免把字段名错误地放进 spec 内部。后续等 `PregelScratchpad` 建立后，再给 trait 增加类似 `get(scratchpad)` 的方法。
 
-## 9. 暂不迁移 schemas 字段，避免复制 Python 动态 schema 缓存
+## 9. 用 StateSchema trait 替代 Python 动态 schema 反射
 
 源项目 `schemas: dict[type[Any], dict[str, BaseChannel | ManagedValueSpec]]` 用于缓存每个 Python schema 类型对应的字段视图，服务于 `state_schema`、`input_schema`、`output_schema`、节点级 input schema 和 branch input schema。
 
-Rust 版当前所有节点和 branch 仍围绕 `StateT` 工作，还没有独立 input/output projection，也没有 schema derive 宏。因此暂不迁移 `schemas` 字段，只保留：
+Rust 版当前所有节点和 branch 仍围绕 `StateT` 工作，还没有独立 input/output projection，也没有 schema derive 宏。因此不复制 Python 的动态 `schemas` 缓存，先引入 crate 内部手写 `StateSchema` trait：
 
 ```rust
-channels
-managed
+trait StateSchema {
+    fn channels() -> HashMap<String, Box<DynChannel>>;
+    fn managed() -> HashMap<String, Box<dyn ManagedValueSpec>>;
+}
 ```
 
-等后续出现独立 `InputT`、`OutputT`、节点输入投影或宏生成 schema 时，再设计 Rust 版 `SchemaSpec` 或 `StateSchema` trait。
+`StateGraph::with_schema()` 会调用 `StateT::channels()` 和 `StateT::managed()`，把 state schema 的普通 channel 与 managed value 填入 builder；`StateGraph::new()` 仍保留为空 builder，方便测试和后续手动装配。由于 channel 和 managed 类型当前仍是 crate 内部骨架，`StateSchema` 和 `with_schema()` 暂不作为外部公共 API 暴露。
+
+这个取舍先达成源项目 `_add_schema(self.state_schema)` 的最小效果，但字段名和 channel 类型仍由用户显式声明。等后续出现独立 `InputT`、`OutputT`、节点输入投影或宏生成 schema 时，再扩展 schema trait 或追加 derive 宏。
 
 ## 10. ChannelWriter 先收敛为同步字段写入层
 
@@ -192,7 +196,7 @@ struct ChannelWriter {
 }
 ```
 
-它只负责把节点输出 `StateValue`、固定值或 mapper 结果组装为 `(channel, StateValue)` pending writes，不直接更新 `HashMap<String, Box<DynChannel>>`。单 channel 写入由 `ChannelWriteEntry` 表达，多 channel 展开由 `ChannelWriteTupleEntry` 表达；后者对应源项目中 `_get_updates`、`_control_branch` 这类把一个输出值展开为多条 writes 的 mapper。
+它只负责把节点输出 `StateValue`、固定值或 mapper 结果组装为 `(channel, StateValue)` pending writes，不直接更新 `HashMap<String, Box<DynChannel>>`。单 channel 写入由 `ChannelWriteEntry` 表达，多 channel 展开由 `ChannelWriteTupleEntry` 表达；后者不保存单独的 `value`，而是直接把节点返回值交给 mapper，对应源项目中 `_get_updates`、`_control_branch` 这类把节点返回值展开为多条 writes 的 mapper。
 
 这个取舍保留了源项目“writer 产出 task writes，Update 阶段再统一应用到 channel”的核心语义，但不复制 Python 的 `RunnableCallable`、config side effect、async writer、`Send` / `TASKS` 和静态写入分析。后续 runtime 接入时应让 task 调用节点 writers 的 `assemble`，再由独立 Update 算法按 channel 聚合并调用 `BaseChannel::update(values)`。
 
@@ -253,7 +257,23 @@ struct Pregel<StateT, UpdateT, ContextT> {
 }
 ```
 
-源项目的 `channels: dict[str, BaseChannel | ManagedValueSpec]` 在 Rust 版拆成 `channels` 和 `managed` 两张表，以保留动态 channel map 的同时避免把 managed value 当作普通 channel 更新。当前 `Pregel::validate` 只迁移 `validate_graph` 的最小结构校验，并重建 `trigger_to_nodes`；`invoke`、`stream` 和 superstep 执行循环等到 task、writes 聚合和状态合并协议稳定后再实现。
+源项目的 `channels: dict[str, BaseChannel | ManagedValueSpec]` 在 Rust 版拆成 `channels` 和 `managed` 两张表，以保留动态 channel map 的同时避免把 managed value 当作普通 channel 更新。当前 `Pregel::validate` 只迁移 `validate_graph` 的最小结构校验，并重建 `trigger_to_nodes`；`invoke`、`stream`、checkpoint、interrupt/resume 等能力仍暂缓。
+
+## 14. CompiledStateGraph 先固定编译装配边界
+
+源项目 `CompiledStateGraph.compile()` 会在编译期完整接入 `attach_node`、`attach_edge`、`attach_branch`、state update writer、branch writer、join barrier channel、schema mapper 和 Pregel 运行时配置。
+
+Rust 版当前实现最小编译装配边界：
+
+```rust
+pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
+```
+
+`compile(self)` 消费 builder，调用 `StateGraph::validate()`，创建 `CompiledStateGraph`，再通过 `attach_node`、`attach_edge` 和 `attach_branch` 装配 `Pregel` 容器。`attach_node` 会让用户节点读取所有 state channel 和 managed value，安装最小 state writer，并为每个用户节点创建 `branch:to:{node}` trigger channel；`attach_edge` 会把 `START -> node` 接入 `START` trigger，并把普通边 `a -> b` 编译为源节点 writer 写入 `branch:to:b`。
+
+源项目 `StateGraph.compile()` 会分别计算 `output_channels` 与 `stream_channels` 并传入 `CompiledStateGraph`。Rust 版当前还没有独立 input/output schema projection，因此先让 `stream_channels` 默认等于 `output_channels`，后续引入 schema 后再拆分两者。
+
+当前不复制源项目的完整 branch writer、checkpoint 或 stream 路径；`PregelNode.bound` 直接复用 builder 中的节点函数，`mapper` 暂不接入真实状态投影协议。条件边当前会返回明确不支持错误；waiting edge 已按源项目 `attach_edge(starts, end)` 路径编译为 `NamedBarrierValue` join channel，目标节点订阅 join channel，各起点节点写入自己的节点名。
 
 ## 当前仍需谨慎的地方
 

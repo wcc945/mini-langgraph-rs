@@ -32,6 +32,8 @@
 - `add_conditional_edges` 当前要求显式传入分支名，不尝试像 Python 版一样从函数对象推断名称。
 - `StateGraph` 已实现 `add_sequence`、`set_entry_point`、`set_conditional_entry_point` 和 `set_finish_point` 的 MVP 版：它们仅作为已有 builder API 的薄封装，不引入自动节点名推断或 Python Runnable 适配。
 - `StateGraph` 已实现 `validate` 的 MVP 版：校验所有边和条件分支的起点/终点是否存在，并要求图至少有一个从 `START` 出发的入口。
+- `StateGraph` 已实现 `compile(self)` MVP：消费 builder，调用 `validate()`，并把用户节点和基础普通边 trigger 编译成 `CompiledStateGraph` / `Pregel` 容器；当前只做结构转换，不执行节点。
+- `CompiledStateGraph` 已作为编译后图的最小外壳，内部持有 `Pregel`；`START -> node` 会生成 `START` trigger，普通 `node -> target` 会生成 `branch:to:{target}` trigger，`node -> END` 不生成 `END` 节点或 trigger。
 - 构图 API 和 `validate` 已统一返回 `GraphError`，避免使用散落的字符串错误；`GraphError` 当前包含重复节点、保留节点名、未知节点、非法边端点、重复分支、缺少入口和未知分支目标等构图错误。
 - 已为核心构图模块补充单元测试，覆盖 `BranchSpec::resolve`、`WaitingEdgeSpec` 起点归一化、`StateNodeSpec` runnable 保存和执行、`StateGraph` builder 成功路径、错误路径与 `validate` 校验。
 - `StateGraph` 已实现 `new()`，用于创建空 builder；暂不接收 Python 版 `state_schema/context_schema/input_schema/output_schema` 参数。
@@ -42,11 +44,10 @@
 
 ## 当前未完成
 
-- `StateGraph` 还没有 `compile` builder 方法；后续 `compile` 应调用现有 `validate` 作为基础图结构校验。
 - `Command<UpdateT>` 当前只是返回值结构方向，`goto`、父图跳转、动态控制流等执行语义尚未实现。
-- `BranchSpec` 当前已有 route 目标解析骨架，并已接入 `add_conditional_edges` 的 builder 存储；但还未接入 Pregel 写入和运行时调度。
-- `CompiledStateGraph` 和运行时调度结构尚未实现。
-- `WaitingEdgeSpec` 已接入多起点 `add_edge` 的 builder 存储，但还未接入 barrier channel 或 Pregel 调度。
+- `BranchSpec` 当前已有 route 目标解析骨架，并已接入 `add_conditional_edges` 的 builder 存储；但 `compile()` 暂时会对条件边返回明确不支持错误，还未接入 Pregel 写入和运行时调度。
+- `CompiledStateGraph` 当前还没有 `invoke`、`stream` 或运行时调度方法。
+- `WaitingEdgeSpec` 已接入多起点 `add_edge` 的 builder 存储；`compile()` 当前会遍历 waiting edge，并通过 `CompiledStateGraph::attach_edge(starts, end)` 生成 `join:{starts}:{end}` barrier channel。
 
 ## 暂缓
 

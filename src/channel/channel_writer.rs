@@ -20,7 +20,6 @@ pub(crate) struct ChannelWriteEntry {
 }
 
 pub(crate) struct ChannelWriteTupleEntry {
-    pub value: ChannelWriteValue,
     pub mapper: ChannelTupleMapper,
 }
 
@@ -102,13 +101,9 @@ impl ChannelWriter {
     fn assemble_tuple_entry(
         entry: &ChannelWriteTupleEntry,
         output: &StateValue,
-        allow_passthrough: bool,
+        _allow_passthrough: bool,
     ) -> Result<Vec<(String, StateValue)>, GraphError> {
-        let Some(value) = Self::entry_value(&entry.value, output, allow_passthrough)? else {
-            return Ok(Vec::new());
-        };
-
-        (entry.mapper)(value)
+        (entry.mapper)(output.clone())
     }
 
     fn entry_value(
@@ -316,7 +311,6 @@ mod tests {
     #[test]
     fn assemble_tuple_entry_expands_value_to_channel_writes() {
         let writer = ChannelWriter::new(vec![ChannelWriterEntry::Tuple(ChannelWriteTupleEntry {
-            value: ChannelWriteValue::Passthrough,
             mapper: Box::new(|value| match value {
                 StateValue::Object(values) => Ok(values.into_iter().collect()),
                 other => Err(GraphError::InvalidChannelUpdate(format!(
@@ -329,7 +323,7 @@ mod tests {
             ("right".to_string(), StateValue::Number(2.0)),
         ]));
 
-        let mut writes = writer.assemble(output, true).unwrap();
+        let mut writes = writer.assemble(output, false).unwrap();
         writes.sort_by(|left, right| left.0.cmp(&right.0));
 
         assert_eq!(

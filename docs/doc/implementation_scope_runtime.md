@@ -32,16 +32,19 @@
 - `PregelNodeBound<StateT, UpdateT, ContextT>` 的节点主逻辑签名对齐 `graph::node::NodeFn`，返回 `NodeOutput<UpdateT>`；当前不预置源项目 `DEFAULT_BOUND` 等默认执行逻辑。
 - `src/pregel/pregel.rs` 已实现 `Pregel` MVP 容器，保存 `nodes`、`channels`、`managed`、`input_channels`、`output_channels`、`stream_channels`、`stream_mode`、`recursion_limit`、`trigger_to_nodes` 和 `name`。
 - `Pregel::validate` 已实现源项目 `validate_graph` 的最小 Rust 版校验：检查节点读取 channel、trigger channel、input/output/stream channel 是否存在，要求至少一个 input channel 被节点订阅，并重建 `trigger_to_nodes`。
+- `CompiledStateGraph` 已能由 `StateGraph::compile()` 生成，并持有可校验的 `Pregel` 容器；当前自身只负责编译装配，不实现 `invoke` 或 `stream`。
+- `CompiledStateGraph::attach_node` 已接入用户节点，设置读取所有 state channel 和 managed value，安装最小 state writer，并为每个节点创建 `branch:to:{node}` trigger channel；`attach_edge` 已接入 `START` trigger、普通边控制流 writer 和多起点 join barrier channel；`attach_branch` 当前返回明确不支持错误。
+- `CompiledStateGraph` 当前将 `stream_channels` 默认设置为与 `output_channels` 相同的 state channel 集合；这对应源项目 `StateGraph.compile()` 会显式传入 stream channels 的路径。
 - `src/error.rs` 已定义公共 `GraphError` 类型，当前覆盖 channel 空读、分支解析错误和构图阶段的基础结构错误。
-- channel 写入层已具备 `ChannelWriter::assemble`，后续 task 执行节点后应调用节点 writers，把组装出的 `(channel, StateValue)` 追加到 task writes；runtime 的 Update 阶段再统一按 channel 聚合同轮 writes，调用对应 channel 的 `update(values)`，并依据返回值维护 changed channel 集合。
+- channel 写入层已具备 `ChannelWriter::assemble`，当前 `CompiledStateGraph::attach_edge` 会为普通边注册控制流 writer；后续 task 执行节点后应调用节点 writers，把组装出的 `(channel, StateValue)` 追加到 task writes。runtime 的 Update 阶段再统一按 channel 聚合同轮 writes，调用对应 channel 的 `update(values)`，并依据返回值维护 changed channel 集合。
 - 已为 `RuntimeContext` 用户上下文字段和 `GraphError` 展示文本补充基础单元测试。
 
 ## 当前未完成
 
-- `CompiledStateGraph` / `Pregel` 运行时尚未实现。
-- `invoke`、`stream`、superstep 调度、节点写入收集和下一轮可见性尚未实现；当前 `Pregel` 只提供容器、配置和校验能力。
-- `PregelNode` 尚未接入 `CompiledStateGraph.attach_node` 或 task 创建流程；当前仅固定数据结构和 mapper/bound 的预期执行顺序。
+- `invoke`、`stream`、superstep 调度、节点执行、节点写入收集和下一轮可见性尚未实现；当前 `Pregel` 和 `CompiledStateGraph` 只提供容器、配置、装配和校验能力。
+- `PregelNode.channels` 已由 `CompiledStateGraph::attach_node` 填入所有 state channel 和 managed value；`mapper` 仍未接入真实节点级输入投影。
 - `NodeOutput::Command` 的运行时解释尚未实现。
+- 条件边、checkpoint、interrupt/resume 尚未接入运行时；waiting edge 已能编译为 join barrier channel，但还没有完整运行时调度验证。
 
 ## 暂缓
 
