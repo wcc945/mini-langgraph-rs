@@ -214,6 +214,47 @@ MissingEntrypoint
 
 后续新增运行时调度、状态合并或 checkpoint 错误时，也应继续集中到 `GraphError`，让 API 返回 `Result<_, GraphError>`。
 
+## 12. PregelNode 只保留任务装配核心字段
+
+源项目 `PregelNode` 同时保存 Pregel 调度所需字段和 LangChain 生态相关策略字段，例如 `channels`、`triggers`、`mapper`、`writers`、`bound`、`retry_policy`、`cache_policy`、`timeout`、`tags`、`metadata`、`subgraphs`、`is_error_handler` 和 `error_handler_node`。
+
+Rust 版当前只迁移后续组装可执行 task 必需的核心字段：
+
+```rust
+struct PregelNode<ContextT> {
+    channels: Vec<String>,
+    triggers: Vec<String>,
+    mapper: Option<PregelNodeMapper<StateT>>,
+    writers: Vec<ChannelWriter>,
+    bound: PregelNodeBound<StateT, UpdateT, ContextT>,
+}
+```
+
+其中 `channels` 先统一保存为 `Vec<String>`，不额外建模源项目 `channels: str | list[str]` 的单值分支；`PregelNodeBound` 的签名对齐 `graph::node::NodeFn`，返回 `NodeOutput<UpdateT>`；当前不预置源项目 `DEFAULT_BOUND` 等默认执行逻辑。`retry`、`cache`、`timeout`、tracing metadata、subgraph 发现和 error handler 暂不迁移，避免在同步 Pregel 主线尚未完成前引入策略层复杂度。
+
+## 13. Pregel 先实现容器和校验，不提前复制运行时生态
+
+源项目 `Pregel` 同时承载核心运行时状态和大量平台/生态能力，例如 checkpoint、store、cache、retry、timeout、interrupt、debug event、schema/jsonschema、subgraph 和 stream transformer。
+
+Rust 版当前只保留同步运行时主线后续需要的最小容器字段：
+
+```rust
+struct Pregel<StateT, UpdateT, ContextT> {
+    nodes: HashMap<String, PregelNode<StateT, UpdateT, ContextT>>,
+    channels: HashMap<String, Box<DynChannel>>,
+    managed: HashMap<String, Box<dyn ManagedValueSpec>>,
+    input_channels: Vec<String>,
+    output_channels: Vec<String>,
+    stream_channels: Option<Vec<String>>,
+    stream_mode: StreamMode,
+    recursion_limit: usize,
+    trigger_to_nodes: HashMap<String, Vec<String>>,
+    name: String,
+}
+```
+
+源项目的 `channels: dict[str, BaseChannel | ManagedValueSpec]` 在 Rust 版拆成 `channels` 和 `managed` 两张表，以保留动态 channel map 的同时避免把 managed value 当作普通 channel 更新。当前 `Pregel::validate` 只迁移 `validate_graph` 的最小结构校验，并重建 `trigger_to_nodes`；`invoke`、`stream` 和 superstep 执行循环等到 task、writes 聚合和状态合并协议稳定后再实现。
+
 ## 当前仍需谨慎的地方
 
 - 当前源码仍是骨架，很多类型未公开或未使用，warning 是预期状态。

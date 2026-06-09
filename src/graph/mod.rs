@@ -1,6 +1,6 @@
 mod branch;
 pub mod consts;
-mod node;
+pub(crate) mod node;
 mod state;
 mod waiting_edge;
 

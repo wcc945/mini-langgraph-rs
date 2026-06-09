@@ -28,6 +28,10 @@
 
 - `src/runtime/mod.rs` 已开始定义 `RuntimeContext<ContextT>`，当前只包含用户运行上下文 `context: ContextT`。
 - 节点函数签名已经预留 `&mut RuntimeContext<ContextT>` 参数，用于后续承载 runtime、config、writer、store、执行元数据等运行时信息。
+- `src/pregel/node.rs` 已实现 `PregelNode` MVP，作为后续组装可执行 task 的运行时节点容器；当前保存输入 `channels: Vec<String>`、触发 `triggers`、可选输入 `mapper`、输出 `writers` 和主逻辑 `bound`。
+- `PregelNodeBound<StateT, UpdateT, ContextT>` 的节点主逻辑签名对齐 `graph::node::NodeFn`，返回 `NodeOutput<UpdateT>`；当前不预置源项目 `DEFAULT_BOUND` 等默认执行逻辑。
+- `src/pregel/pregel.rs` 已实现 `Pregel` MVP 容器，保存 `nodes`、`channels`、`managed`、`input_channels`、`output_channels`、`stream_channels`、`stream_mode`、`recursion_limit`、`trigger_to_nodes` 和 `name`。
+- `Pregel::validate` 已实现源项目 `validate_graph` 的最小 Rust 版校验：检查节点读取 channel、trigger channel、input/output/stream channel 是否存在，要求至少一个 input channel 被节点订阅，并重建 `trigger_to_nodes`。
 - `src/error.rs` 已定义公共 `GraphError` 类型，当前覆盖 channel 空读、分支解析错误和构图阶段的基础结构错误。
 - channel 写入层已具备 `ChannelWriter::assemble`，后续 task 执行节点后应调用节点 writers，把组装出的 `(channel, StateValue)` 追加到 task writes；runtime 的 Update 阶段再统一按 channel 聚合同轮 writes，调用对应 channel 的 `update(values)`，并依据返回值维护 changed channel 集合。
 - 已为 `RuntimeContext` 用户上下文字段和 `GraphError` 展示文本补充基础单元测试。
@@ -35,7 +39,8 @@
 ## 当前未完成
 
 - `CompiledStateGraph` / `Pregel` 运行时尚未实现。
-- `invoke`、`stream`、superstep 调度、节点写入收集和下一轮可见性尚未实现。
+- `invoke`、`stream`、superstep 调度、节点写入收集和下一轮可见性尚未实现；当前 `Pregel` 只提供容器、配置和校验能力。
+- `PregelNode` 尚未接入 `CompiledStateGraph.attach_node` 或 task 创建流程；当前仅固定数据结构和 mapper/bound 的预期执行顺序。
 - `NodeOutput::Command` 的运行时解释尚未实现。
 
 ## 暂缓

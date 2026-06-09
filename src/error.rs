@@ -63,6 +63,27 @@ pub enum GraphError {
         branch: String,
         target: String,
     },
+
+    #[error("Pregel node `{node}` reads unknown channel `{channel}`")]
+    UnknownPregelReadChannel { node: String, channel: String },
+
+    #[error("Pregel node `{node}` subscribes to unknown trigger channel `{channel}`")]
+    UnknownPregelTriggerChannel { node: String, channel: String },
+
+    #[error("Pregel input channel `{0}` does not exist")]
+    UnknownPregelInputChannel(String),
+
+    #[error("no Pregel input channel is subscribed to by any node: {0:?}")]
+    PregelInputChannelNotSubscribed(Vec<String>),
+
+    #[error("Pregel output channel `{0}` does not exist")]
+    UnknownPregelOutputChannel(String),
+
+    #[error("Pregel stream channel `{0}` does not exist")]
+    UnknownPregelStreamChannel(String),
+
+    #[error("Pregel recursion limit must be greater than 0, got {0}")]
+    InvalidPregelRecursionLimit(usize),
 }
 
 #[cfg(test)]

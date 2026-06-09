@@ -2,6 +2,7 @@ mod channel;
 pub mod error;
 pub mod graph;
 mod managed;
+mod pregel;
 mod runtime;
 
 pub use crate::error::GraphError;
