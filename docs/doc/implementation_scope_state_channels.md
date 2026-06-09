@@ -29,7 +29,7 @@
 - 已实现 `LastValue`、`BinaryOperatorAggregate`、`EphemeralValue` 和 `NamedBarrierValue` 的 MVP 版，并补充单元测试覆盖空读、更新、checkpoint/copy、consume、reducer 错误和 barrier 非法值。
 - 为了让不同字段的 channel 能放入同一个 `HashMap`，当前引入 crate 内部动态值 `StateValue`，并定义 `DynChannel = dyn BaseChannel<Value = StateValue, Update = StateValue, Checkpoint = StateValue>`。
 - 已实现 `ChannelWriter` MVP（`src/channel/channel_writer.rs`），用于把节点输出 `StateValue` 组装成待追加到 task writes 的 `(channel, StateValue)` 项，不直接更新 channel 表。
-- `ChannelWriter::assemble` 支持单 channel 的 `ChannelWriteEntry` 和多 channel 的 `ChannelWriteTupleEntry`：前者可处理固定值、passthrough 输出、mapper 转换、`SkipWrite` 和 `skip_none`；后者直接把节点返回值交给 mapper，再展开为多条 channel writes，对应源项目 `_get_updates` / `_control_branch` 一类 tuple mapper 语义。
+- `ChannelWriter::assemble` 支持单 channel 的 `ChannelWriteEntry`、多 channel 的 `ChannelWriteTupleEntry` 和可执行 `ChannelExecutable`：单 channel entry 可处理固定值、passthrough 输出、mapper 转换、`SkipWrite` 和 `skip_none`；tuple entry 直接把节点返回值交给 mapper，再展开为多条 channel writes；executable entry 可读取当前 state 和 `RuntimeContext` 后返回动态 `ChannelWriteEntry`，用于表达条件分支 route writer。
 - `ChannelWriter::state_value` 提供最小 `Into<StateValue>` 转换入口，并支持 `bool`、数字、字符串、列表和 `HashMap<String, T>` 等常见 Rust 值转为 `StateValue`；暂不把 `Option<T>` 自动转为 `StateValue`，避免混淆 `None = 不写字段` 与显式 `StateValue::Null`。
 - `StateGraph` 当前的 channel 表使用 `channels: HashMap<String, Box<DynChannel>>`，对应源项目 `channels: dict[str, BaseChannel]` 的动态类型路线。
 - `src/managed/mod.rs` 已新增最小 `ManagedValueSpec` trait，`StateGraph` 已包含 `managed: HashMap<String, Box<dyn ManagedValueSpec>>`，对应源项目 `managed: dict[str, ManagedValueSpec]`；字段名保存在 `HashMap` key 中，spec 表示 managed value 的计算规格。

@@ -33,10 +33,10 @@
 - `src/pregel/pregel.rs` 已实现 `Pregel` MVP 容器，保存 `nodes`、`channels`、`managed`、`input_channels`、`output_channels`、`stream_channels`、`stream_mode`、`recursion_limit`、`trigger_to_nodes` 和 `name`。
 - `Pregel::validate` 已实现源项目 `validate_graph` 的最小 Rust 版校验：检查节点读取 channel、trigger channel、input/output/stream channel 是否存在，要求至少一个 input channel 被节点订阅，并重建 `trigger_to_nodes`。
 - `CompiledStateGraph` 已能由 `StateGraph::compile()` 生成，并持有可校验的 `Pregel` 容器；当前自身只负责编译装配，不实现 `invoke` 或 `stream`。
-- `CompiledStateGraph::attach_node` 已接入用户节点，设置读取所有 state channel 和 managed value，安装最小 state writer，并为每个节点创建 `branch:to:{node}` trigger channel；`attach_edge` 已接入 `START` trigger、普通边控制流 writer 和多起点 join barrier channel；`attach_branch` 当前返回明确不支持错误。
+- `CompiledStateGraph::attach_node` 已接入 `START` 入口节点和用户节点：`START` 节点订阅 `START` input channel，用户节点读取所有 state channel 和 managed value，安装最小 state writer，并创建和订阅 `branch:to:{node}` trigger channel；`attach_edge` 已接入普通边控制流 writer 和多起点 join barrier channel；`attach_branch` 已把单目标条件分支封装为可执行 `ChannelWriter`，用于按路由结果写入 `branch:to:{target}`。
 - `CompiledStateGraph` 当前将 `stream_channels` 默认设置为与 `output_channels` 相同的 state channel 集合；这对应源项目 `StateGraph.compile()` 会显式传入 stream channels 的路径。
 - `src/error.rs` 已定义公共 `GraphError` 类型，当前覆盖 channel 空读、分支解析错误和构图阶段的基础结构错误。
-- channel 写入层已具备 `ChannelWriter::assemble`，当前 `CompiledStateGraph::attach_edge` 会为普通边注册控制流 writer；后续 task 执行节点后应调用节点 writers，把组装出的 `(channel, StateValue)` 追加到 task writes。runtime 的 Update 阶段再统一按 channel 聚合同轮 writes，调用对应 channel 的 `update(values)`，并依据返回值维护 changed channel 集合。
+- channel 写入层已具备 `ChannelWriter::assemble`，当前 `CompiledStateGraph::attach_edge` 会为普通边注册控制流 writer，`attach_branch` 会注册可执行条件分支 writer。后续 task 执行节点后应把节点输出、当前 state 和 `RuntimeContext` 一起传给节点 writers，把组装出的 `(channel, StateValue)` 追加到 task writes。runtime 的 Update 阶段再统一按 channel 聚合同轮 writes，调用对应 channel 的 `update(values)`，并依据返回值维护 changed channel 集合。
 - 已为 `RuntimeContext` 用户上下文字段和 `GraphError` 展示文本补充基础单元测试。
 
 ## 当前未完成
@@ -44,7 +44,7 @@
 - `invoke`、`stream`、superstep 调度、节点执行、节点写入收集和下一轮可见性尚未实现；当前 `Pregel` 和 `CompiledStateGraph` 只提供容器、配置、装配和校验能力。
 - `PregelNode.channels` 已由 `CompiledStateGraph::attach_node` 填入所有 state channel 和 managed value；`mapper` 仍未接入真实节点级输入投影。
 - `NodeOutput::Command` 的运行时解释尚未实现。
-- 条件边、checkpoint、interrupt/resume 尚未接入运行时；waiting edge 已能编译为 join barrier channel，但还没有完整运行时调度验证。
+- 条件边和 waiting edge 已能编译为 writer / trigger / barrier channel，但还没有完整运行时调度验证；checkpoint、interrupt/resume 尚未接入运行时。
 
 ## 暂缓
 

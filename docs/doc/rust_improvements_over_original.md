@@ -269,11 +269,11 @@ Rust 版当前实现最小编译装配边界：
 pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
 ```
 
-`compile(self)` 消费 builder，调用 `StateGraph::validate()`，创建 `CompiledStateGraph`，再通过 `attach_node`、`attach_edge` 和 `attach_branch` 装配 `Pregel` 容器。`attach_node` 会让用户节点读取所有 state channel 和 managed value，安装最小 state writer，并为每个用户节点创建 `branch:to:{node}` trigger channel；`attach_edge` 会把 `START -> node` 接入 `START` trigger，并把普通边 `a -> b` 编译为源节点 writer 写入 `branch:to:b`。
+`compile(self)` 消费 builder，调用 `StateGraph::validate()`，创建 `CompiledStateGraph`，再通过 `attach_node`、`attach_edge` 和 `attach_branch` 装配 `Pregel` 容器。Rust 版对齐源项目，先以 `attach_node(START, None)` 创建入口节点并订阅 `START` input channel；用户节点读取所有 state channel 和 managed value，安装最小 state writer，并为自己创建和订阅 `branch:to:{node}` trigger channel；`attach_edge` 会把 `START -> a` 和普通边 `a -> b` 都编译为起点节点 writer 写入 `branch:to:{target}`，不重复追加目标节点已有的 `branch:to:{target}` trigger；`attach_branch` 会把单目标条件分支封装为可执行 `ChannelWriter`，按 route 结果写入 `branch:to:{target}`。
 
 源项目 `StateGraph.compile()` 会分别计算 `output_channels` 与 `stream_channels` 并传入 `CompiledStateGraph`。Rust 版当前还没有独立 input/output schema projection，因此先让 `stream_channels` 默认等于 `output_channels`，后续引入 schema 后再拆分两者。
 
-当前不复制源项目的完整 branch writer、checkpoint 或 stream 路径；`PregelNode.bound` 直接复用 builder 中的节点函数，`mapper` 暂不接入真实状态投影协议。条件边当前会返回明确不支持错误；waiting edge 已按源项目 `attach_edge(starts, end)` 路径编译为 `NamedBarrierValue` join channel，目标节点订阅 join channel，各起点节点写入自己的节点名。
+当前不复制源项目的完整 checkpoint 或 stream 路径；`PregelNode.bound` 直接复用 builder 中的节点函数，`mapper` 暂不接入真实状态投影协议。源项目通过 `ChannelWrite.register_writer(branch.run(...))` 把分支 runnable 标记为 writer；Rust 版用泛型可执行 `ChannelWriter` 表达同一编译边界，让 writer 能访问 `&StateT` 和 `RuntimeContext` 后返回 `ChannelWriteEntry`。该实现暂不迁移 schema reader、`Send`、async 或 Runnable 生态。waiting edge 已按源项目 `attach_edge(starts, end)` 路径编译为 `NamedBarrierValue` join channel，目标节点订阅 join channel，各起点节点写入自己的节点名。
 
 ## 当前仍需谨慎的地方
 

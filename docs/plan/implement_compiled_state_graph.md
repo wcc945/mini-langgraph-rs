@@ -22,8 +22,8 @@
 
 - `CompiledStateGraph` 内部持有 `Pregel<StateT, UpdateT, ContextT>`，不暴露运行时执行方法。
 - 新增 `CompiledStateGraph::attach_node`，为用户节点注册 `PregelNode`，读取当前所有 state channel 和 managed value，安装最小 state writer，并创建 `branch:to:{node}` trigger channel。
-- 新增 `CompiledStateGraph::attach_edge`，接收起点集合：单起点边将 `START -> node` 接入 `START` trigger，并将普通边 `a -> b` 编译为源节点 writer 写入 `branch:to:b`；多起点边按源项目语义生成 `join:{starts}:{end}` barrier channel。
-- 新增 `CompiledStateGraph::attach_branch` 骨架，当前返回 `UnsupportedCompiledBranches`。
+- 新增 `CompiledStateGraph::attach_edge`，接收起点集合：单起点边会让起点节点写入 `branch:to:{end}`，包括 `START -> node`；多起点边按源项目语义生成 `join:{starts}:{end}` barrier channel。
+- 新增 `CompiledStateGraph::attach_branch` 骨架，原计划阶段返回 `UnsupportedCompiledBranches`；后续已由 `implement_attach_branch.md` 接续实现。
 - `StateGraph::compile(self)` 恢复无参签名，消费 builder，调用 `validate()`，创建 `CompiledStateGraph`，依次 attach node / edge / branch，最后 validate Pregel 容器。
 - `CompiledStateGraph` 默认将 `stream_channels` 设为与 `output_channels` 相同的 state channel 集合；后续有独立 schema 后再区分 output projection 与 stream projection。
 - `StateGraph::compile(self)` 会像源项目一样遍历 `waiting_edges` 并传入 `attach_edge(starts, end)`；多起点 join 使用 `NamedBarrierValue`，目标节点订阅 join channel，各起点节点向 join channel 写入自己的节点名。
@@ -33,10 +33,10 @@
 - 合法单节点图可编译，用户节点被注册为 `PregelNode`。
 - 无入口图编译失败并返回 `MissingEntrypoint`。
 - `attach_node` 为节点创建 `branch:to:{node}` trigger channel，设置 state/managed 读取 channels，并安装 state writer。
-- `START -> a` 会让节点 `a` 订阅 `START` trigger。
-- `a -> b` 会让节点 `b` 订阅 `branch:to:b`，并创建对应 channel。
+- `START -> a` 会让 `START` 节点写入 `branch:to:a`，节点 `a` 复用自身默认订阅的 `branch:to:a` trigger。
+- `a -> b` 会复用节点 `b` 在 `attach_node` 时已订阅的 `branch:to:b`，并让节点 `a` 写入该 trigger channel。
 - `a -> END` 不生成 `END` 节点或 `END` trigger。
-- 条件边当前返回明确不支持错误；waiting edge 会编译为 join barrier channel。
+- 原计划阶段条件边返回明确不支持错误；waiting edge 会编译为 join barrier channel。条件边支持情况以后续 `implement_attach_branch.md` 为准。
 - `stream_channels` 默认等于 `output_channels`。
 
 验证命令：`cargo fmt`、`cargo test`、`cargo check`、`cargo clippy --all-targets --all-features`。
@@ -44,6 +44,8 @@
 ## Result
 
 已按本计划完成：`CompiledStateGraph` 只保留编译装配职责，不再引入 `StateCodec`、`InvokeResult` 或 `invoke` 执行循环；`StateGraph::compile(self)` 已恢复为无参接口，并通过 `attach_node` / `attach_edge` / `attach_branch` 装配 Pregel 容器。`attach_node` 当前会写入 state/managed 读取 channels，并传入最小 state writer；state writer 的 tuple mapper 直接接收节点返回值并解析出更新字段。普通边控制流 writer 和 waiting edge join barrier 都由 `attach_edge` 追加。
+
+后续更新：`docs/plan/implement_attach_branch.md` 已接续实现 `attach_branch`，当前单目标条件分支会被封装为可执行 `ChannelWriter`，不再返回 `UnsupportedCompiledBranches`。
 
 ## Assumptions
 

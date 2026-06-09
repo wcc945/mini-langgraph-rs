@@ -18,7 +18,7 @@ pub(crate) struct PregelNode<StateT, UpdateT, ContextT> {
     pub(crate) channels: Vec<String>,
     pub(crate) triggers: Vec<String>,
     pub(crate) mapper: Option<PregelNodeMapper<StateT>>,
-    pub(crate) writers: Vec<ChannelWriter>,
+    pub(crate) writers: Vec<ChannelWriter<StateT, ContextT>>,
     pub(crate) bound: PregelNodeBound<StateT, UpdateT, ContextT>,
 }
 
@@ -27,7 +27,7 @@ impl<StateT, UpdateT, ContextT> PregelNode<StateT, UpdateT, ContextT> {
         channels: Vec<String>,
         triggers: Vec<String>,
         mapper: Option<PregelNodeMapper<StateT>>,
-        writers: Vec<ChannelWriter>,
+        writers: Vec<ChannelWriter<StateT, ContextT>>,
         bound: PregelNodeBound<StateT, UpdateT, ContextT>,
     ) -> Self {
         Self {
@@ -47,7 +47,7 @@ mod tests {
         ChannelWriteEntry, ChannelWriteValue, ChannelWriterEntry,
     };
 
-    fn writer(channel: &str) -> ChannelWriter {
+    fn writer(channel: &str) -> ChannelWriter<i64, i64> {
         ChannelWriter::new(vec![ChannelWriterEntry::Channel(ChannelWriteEntry {
             channel: channel.to_string(),
             value: ChannelWriteValue::Passthrough,
@@ -71,10 +71,17 @@ mod tests {
         let mut context = RuntimeContext { context: 3 };
         let mapped = node.mapper.as_ref().unwrap()(StateValue::Null).unwrap();
         let output = (node.bound)(&mapped, &mut context).unwrap();
+        let writes = node.writers[0]
+            .assemble(StateValue::Number(1.0), true, &mapped, &mut context)
+            .unwrap();
 
         assert_eq!(node.channels, vec!["input".to_string()]);
         assert_eq!(node.triggers, vec!["trigger".to_string()]);
         assert_eq!(node.writers.len(), 1);
+        assert_eq!(
+            writes,
+            vec![("output".to_string(), StateValue::Number(1.0))]
+        );
         assert_eq!(context.context, 5);
         assert!(matches!(output, NodeOutput::Update(7)));
     }

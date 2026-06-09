@@ -1,5 +1,4 @@
 use crate::channel::DynChannel;
-use crate::channel::ephemeral_value::EphemeralValue;
 use crate::error::GraphError;
 use crate::graph::branch::{BranchPathFn, BranchSpec};
 use crate::graph::compiled::CompiledStateGraph;
@@ -233,7 +232,11 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
 
     pub fn compile(
         self,
-    ) -> Result<CompiledStateGraph<StateT, UpdateT, ContextT, InputT, OutputT>, GraphError> {
+    ) -> Result<CompiledStateGraph<StateT, UpdateT, ContextT, InputT, OutputT>, GraphError>
+    where
+        StateT: 'static,
+        ContextT: 'static,
+    {
         self.validate()?;
 
         let StateGraph {
@@ -241,7 +244,7 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
             edges,
             branches,
             waiting_edges,
-            mut channels,
+            channels,
             managed,
             _marker: _,
         } = self;
@@ -252,14 +255,12 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
             channels.keys().cloned().collect()
         };
 
-        channels
-            .entry(START.to_string())
-            .or_insert_with(|| Box::new(EphemeralValue::new(false)) as Box<DynChannel>);
-
         let mut compiled = CompiledStateGraph::new(channels, managed, output_channels);
 
+        compiled.attach_node(START.to_string(), None);
+
         for (name, node) in nodes {
-            compiled.attach_node(name, node);
+            compiled.attach_node(name, Some(node));
         }
         for (start, end) in &edges {
             compiled.attach_edge(vec![start.clone()], end);
@@ -350,9 +351,11 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel::StateValue;
     use crate::channel::last_value::LastValue;
     use crate::graph::node::NodeOutput;
     use crate::managed::ManagedValueSpec;
+    use crate::runtime::RuntimeContext;
 
     struct TestManagedValue;
 
@@ -506,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_builds_start_trigger_for_entrypoint() {
+    fn compile_entrypoint_adds_writer_to_start_node() {
         let mut graph: StateGraph<i32, i32> = StateGraph::new();
 
         graph.add_node("a", noop_node()).unwrap();
@@ -514,9 +517,16 @@ mod tests {
         graph.set_finish_point("a").unwrap();
 
         let compiled = graph.compile().unwrap();
+        let start = compiled.pregel.nodes.get(START).unwrap();
         let node = compiled.pregel.nodes.get("a").unwrap();
+        let mut context = RuntimeContext { context: () };
+        let writes = start.writers[0]
+            .assemble(StateValue::Null, false, &0, &mut context)
+            .unwrap();
 
-        assert!(node.triggers.contains(&START.to_string()));
+        assert_eq!(start.triggers, vec![START.to_string()]);
+        assert_eq!(writes, vec![("branch:to:a".to_string(), StateValue::Null)]);
+        assert_eq!(node.triggers, vec!["branch:to:a".to_string()]);
         assert!(compiled.pregel.channels.contains_key(START));
     }
 
@@ -645,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_builds_target_trigger_for_regular_edge() {
+    fn compile_regular_edge_reuses_target_branch_trigger() {
         let mut graph: StateGraph<i32, i32> = StateGraph::new();
 
         graph.add_node("a", noop_node()).unwrap();
@@ -683,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_rejects_branches_for_now() {
+    fn compile_attaches_conditional_entry_point() {
         let mut graph: StateGraph<i32, i32> = StateGraph::new();
         let ends = HashMap::from([("next".to_string(), "a".to_string())]);
 
@@ -693,9 +703,41 @@ mod tests {
             .unwrap();
         graph.set_finish_point("a").unwrap();
 
-        let error = expect_compile_error(graph.compile());
+        let compiled = graph.compile().unwrap();
+        let start = compiled.pregel.nodes.get(START).unwrap();
+        let mut context = RuntimeContext { context: () };
+        let writes = start.writers[0]
+            .assemble(StateValue::Null, false, &0, &mut context)
+            .unwrap();
 
-        assert!(matches!(error, GraphError::UnsupportedCompiledBranches));
+        assert_eq!(start.triggers, vec![START.to_string()]);
+        assert_eq!(writes, vec![("branch:to:a".to_string(), StateValue::Null)]);
+        assert!(compiled.pregel.channels.contains_key("branch:to:a"));
+    }
+
+    #[test]
+    fn compile_attaches_node_conditional_branch_writer() {
+        let mut graph: StateGraph<i32, i32> = StateGraph::new();
+        let ends = HashMap::from([("next".to_string(), "b".to_string())]);
+
+        graph.add_node("a", noop_node()).unwrap();
+        graph.add_node("b", noop_node()).unwrap();
+        graph.set_entry_point("a").unwrap();
+        graph
+            .add_conditional_edges("a", "route", route_path(), ends)
+            .unwrap();
+        graph.set_finish_point("b").unwrap();
+
+        let compiled = graph.compile().unwrap();
+        let node = compiled.pregel.nodes.get("a").unwrap();
+        let mut context = RuntimeContext { context: () };
+        let writes = node.writers[1]
+            .assemble(StateValue::Null, false, &0, &mut context)
+            .unwrap();
+
+        assert_eq!(node.writers.len(), 2);
+        assert_eq!(writes, vec![("branch:to:b".to_string(), StateValue::Null)]);
+        assert!(compiled.pregel.channels.contains_key("branch:to:b"));
     }
 
     #[test]

@@ -9,9 +9,9 @@ use crate::channel::ephemeral_value::EphemeralValue;
 use crate::channel::named_barrier_value::NamedBarrierValue;
 use crate::channel::{DynChannel, StateValue};
 use crate::error::GraphError;
-use crate::graph::branch::BranchSpec;
+use crate::graph::branch::{BranchOutput, BranchSpec};
 use crate::graph::consts::{END, START};
-use crate::graph::node::StateNodeSpec;
+use crate::graph::node::{NodeOutput, StateNodeSpec};
 use crate::managed::ManagedValueSpec;
 use crate::pregel::node::PregelNode;
 use crate::pregel::pregel::{Pregel, StreamMode};
@@ -23,6 +23,9 @@ pub struct CompiledStateGraph<StateT, UpdateT, ContextT = (), InputT = StateT, O
 
 impl<StateT, UpdateT, ContextT, InputT, OutputT>
     CompiledStateGraph<StateT, UpdateT, ContextT, InputT, OutputT>
+where
+    StateT: 'static,
+    ContextT: 'static,
 {
     pub(crate) fn new(
         channels: HashMap<String, Box<DynChannel>>,
@@ -49,8 +52,30 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
     pub(crate) fn attach_node(
         &mut self,
         key: String,
-        node: StateNodeSpec<StateT, UpdateT, ContextT>,
+        node: Option<StateNodeSpec<StateT, UpdateT, ContextT>>,
     ) {
+        if key == START {
+            self.pregel
+                .channels
+                .entry(START.to_string())
+                .or_insert_with(|| Box::new(EphemeralValue::new(false)) as Box<DynChannel>);
+            self.pregel.nodes.insert(
+                key,
+                PregelNode::new(
+                    vec![START.to_string()],
+                    vec![START.to_string()],
+                    None,
+                    Vec::new(),
+                    Box::new(|_, _| Ok(NodeOutput::None)),
+                ),
+            );
+            return;
+        }
+
+        let Some(node) = node else {
+            return;
+        };
+
         let read_channels = self.node_read_channels();
         let writers = vec![Self::state_writer(read_channels.clone())];
         let trigger = Self::branch_trigger_channel(&key);
@@ -97,26 +122,9 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
         }
 
         let start = &starts[0];
-        let trigger = if start == START {
-            START.to_string()
-        } else {
-            Self::branch_trigger_channel(end)
-        };
+        let trigger = Self::branch_trigger_channel(end);
 
-        self.pregel
-            .channels
-            .entry(trigger.clone())
-            .or_insert_with(|| Box::new(EphemeralValue::new(false)) as Box<DynChannel>);
-
-        if let Some(node) = self.pregel.nodes.get_mut(end) {
-            node.triggers.push(trigger.clone());
-            node.triggers.sort();
-            node.triggers.dedup();
-        }
-
-        if start != START
-            && let Some(node) = self.pregel.nodes.get_mut(start)
-        {
+        if let Some(node) = self.pregel.nodes.get_mut(start) {
             node.writers
                 .push(Self::trigger_writer(trigger, StateValue::Null));
         }
@@ -124,11 +132,19 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
 
     pub(crate) fn attach_branch(
         &mut self,
-        _start: &str,
+        start: &str,
         _name: &str,
-        _branch: BranchSpec<StateT, ContextT>,
+        branch: BranchSpec<StateT, ContextT>,
     ) -> Result<(), GraphError> {
-        Err(GraphError::UnsupportedCompiledBranches)
+        let writer = Self::branch_writer(branch);
+
+        let Some(node) = self.pregel.nodes.get_mut(start) else {
+            return Err(GraphError::UnknownEdgeSource(start.to_string()));
+        };
+
+        node.writers.push(writer);
+
+        Ok(())
     }
 
     pub(crate) fn validate(mut self) -> Result<Self, GraphError> {
@@ -144,13 +160,37 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
         format!("join:{}:{target}", starts.join("+"))
     }
 
-    fn trigger_writer(channel: String, value: StateValue) -> ChannelWriter {
+    fn trigger_writer(channel: String, value: StateValue) -> ChannelWriter<StateT, ContextT> {
         ChannelWriter::new(vec![ChannelWriterEntry::Channel(ChannelWriteEntry {
             channel,
             value: ChannelWriteValue::Value(value),
             skip_none: false,
             mapper: None,
         })])
+    }
+
+    fn branch_writer(branch: BranchSpec<StateT, ContextT>) -> ChannelWriter<StateT, ContextT> {
+        ChannelWriter::new(vec![ChannelWriterEntry::Executable(Box::new(
+            move |state, context| {
+                let Some(key) = (branch.path)(state, context) else {
+                    return Ok(Vec::new());
+                };
+
+                branch
+                    .resolve(BranchOutput::One(key))?
+                    .into_iter()
+                    .filter(|target| target != END)
+                    .map(|target| {
+                        Ok(ChannelWriteEntry {
+                            channel: Self::branch_trigger_channel(&target),
+                            value: ChannelWriteValue::Value(StateValue::Null),
+                            skip_none: false,
+                            mapper: None,
+                        })
+                    })
+                    .collect()
+            },
+        ))])
     }
 
     fn node_read_channels(&self) -> Vec<String> {
@@ -168,7 +208,7 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
         channels
     }
 
-    fn state_writer(output_channels: Vec<String>) -> ChannelWriter {
+    fn state_writer(output_channels: Vec<String>) -> ChannelWriter<StateT, ContextT> {
         let mapper: ChannelTupleMapper = Box::new(move |value| match value {
             StateValue::Object(values) => Ok(output_channels
                 .iter()
