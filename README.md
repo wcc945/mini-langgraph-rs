@@ -49,7 +49,50 @@ src/state/      # 状态 update、字段合并和 reducer 协议
 src/checkpoint/ # 可恢复执行能力的边界预留
 ```
 
-当前代码仍处于骨架阶段，`add_node`、`compile`、`invoke` 和 `stream` 尚未实现。channel 侧已具备 `LastValue`、`BinaryOperatorAggregate`、`EphemeralValue`、`NamedBarrierValue` 和 `ChannelWriter::assemble` 的 MVP；后续 runtime 仍需把 task writes 按 channel 聚合并调用 channel `update(values)`。
+当前代码仍处于骨架阶段，`add_node`、`add_edge`、`add_conditional_edges`、`add_sequence`、`compile` 和 Pregel 容器校验已具备 MVP；`invoke`、`stream` 和完整 superstep 调度尚未实现。channel 侧已具备 `LastValue`、`BinaryOperatorAggregate`、`EphemeralValue`、`NamedBarrierValue` 和 `ChannelWriter::assemble` 的 MVP；后续 runtime 仍需把 task writes 按 channel 聚合并调用 channel `update(values)`。
+
+## 功能对比
+
+说明：`√` 表示当前项目已有可用实现或明确的编译装配能力；`×` 表示尚未实现，或还没有达到端到端可用状态。
+
+| 源项目功能 | LangGraph 源项目 | mini-langgraph-rs |
+| --- | --- | --- |
+| `StateGraph` 构图器 | √ | √ |
+| `START` / `END` 虚拟节点 | √ | √ |
+| 显式节点注册 `add_node(name, func)` | √ | √ |
+| 自动从函数或 runnable 推断节点名 | √ | × |
+| 普通边 `add_edge(from, to)` | √ | √ |
+| 多起点 join 边 `add_edge([a, b], c)` | √ | √ |
+| 条件边定义 `add_conditional_edges` | √ | √ |
+| 条件边路由到多个目标 | √ | √ |
+| `add_sequence` 顺序构图辅助 | √ | √ |
+| `set_entry_point` / `set_finish_point` | √ | √ |
+| `compile()` 生成可执行图容器 | √ | √ |
+| `invoke()` 一次性执行图 | √ | × |
+| `stream()` 流式执行图 | √ | × |
+| 异步执行 `ainvoke()` / `astream()` | √ | × |
+| Pregel superstep 调度循环 | √ | × |
+| 节点局部状态更新 `State -> Partial<State>` | √ | × |
+| 默认 `LastValue` 字段合并 | √ | √ |
+| reducer 聚合 `BinaryOperatorAggregate` | √ | √ |
+| 调度信号 `EphemeralValue` | √ | √ |
+| join barrier `NamedBarrierValue` | √ | √ |
+| `ChannelWriter` 写入组装 | √ | √ |
+| `StateSchema` 推导 state channel / managed value | √ | √ |
+| 从 Python/Rust 类型字段自动推断 schema | √ | × |
+| managed value 运行时读取 | √ | × |
+| 运行时上下文注入 | √ | × |
+| `Command(update/goto/resume/graph)` 执行语义 | √ | × |
+| `Send` 动态并行分发 | √ | × |
+| checkpoint 持久化 | √ | × |
+| interrupt / resume | √ | × |
+| time travel / replay | √ | × |
+| retry / cache / timeout 节点策略 | √ | × |
+| 多种 stream mode | √ | × |
+| `MessagesState` / `add_messages` | √ | × |
+| prebuilt agent / tool node / React agent | √ | × |
+| LangGraph Platform、CLI、远程 SDK | √ | × |
+| LangSmith tracing / 可观测性集成 | √ | × |
 
 ## 开发命令
 
