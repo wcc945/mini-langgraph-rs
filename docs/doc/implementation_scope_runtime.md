@@ -30,6 +30,7 @@
 - 节点函数签名已经预留 `&mut RuntimeContext<ContextT>` 参数，用于后续承载 runtime、config、writer、store、执行元数据等运行时信息。
 - `src/pregel/node.rs` 已实现 `PregelNode` MVP，作为后续组装可执行 task 的运行时节点容器；当前保存输入 `channels: Vec<String>`、触发 `triggers`、可选输入 `mapper`、输出 `writers` 和主逻辑 `bound`。
 - `PregelNodeBound<StateT, UpdateT, ContextT>` 的节点主逻辑签名对齐 `graph::node::NodeFn`，返回 `NodeOutput<UpdateT>`；当前不预置源项目 `DEFAULT_BOUND` 等默认执行逻辑。
+- `src/pregel/task.rs` 已新增最小 task 中间层骨架：`PregelTask` 表示已计划执行的节点任务，`PregelTaskWrites` 表示 Update 阶段可应用的写入批次，`PregelTaskResult` 表示节点执行输出与组装后的 writes，`PregelStep` 表示一个 superstep 的任务集合；当前只保留结构和方法桩，方法体暂为 `todo!()`。
 - `src/pregel/pregel.rs` 已实现 `Pregel` MVP 容器，保存 `nodes`、`channels`、`managed`、`input_channels`、`output_channels`、`stream_channels`、`stream_mode`、`recursion_limit`、`trigger_to_nodes` 和 `name`。
 - `Pregel::validate` 已实现源项目 `validate_graph` 的最小 Rust 版校验：检查节点读取 channel、trigger channel、input/output/stream channel 是否存在，要求至少一个 input channel 被节点订阅，并重建 `trigger_to_nodes`。
 - `CompiledStateGraph` 已能由 `StateGraph::compile()` 生成，并持有可校验的 `Pregel` 容器；当前自身只负责编译装配，不实现 `invoke` 或 `stream`。
@@ -42,6 +43,7 @@
 ## 当前未完成
 
 - `invoke`、`stream`、superstep 调度、节点执行、节点写入收集和下一轮可见性尚未实现；当前 `Pregel` 和 `CompiledStateGraph` 只提供容器、配置、装配和校验能力。
+- `task.rs` 中的 `PregelTask` / `PregelTaskWrites` / `PregelTaskResult` / `PregelStep` 仍未接入 `Pregel` 主循环；后续需要在实现 `stream()` 时填充 task 计划、执行、写入转换和 step 汇总逻辑。
 - `PregelNode.channels` 已由 `CompiledStateGraph::attach_node` 填入所有 state channel 和 managed value；`mapper` 仍未接入真实节点级输入投影。
 - `NodeOutput::Command` 的运行时解释尚未实现。
 - 条件边和 waiting edge 已能编译为 writer / trigger / barrier channel，但还没有完整运行时调度验证；checkpoint、interrupt/resume 尚未接入运行时。
