@@ -296,6 +296,36 @@ pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
 
 当前不复制源项目的完整 checkpoint 或 stream 路径；`PregelNode.bound` 直接复用 builder 中的节点函数，`mapper` 暂不接入真实状态投影协议。源项目通过 `ChannelWrite.register_writer(branch.run(...))` 把分支 runnable 标记为 writer；Rust 版用泛型可执行 `ChannelWriter` 表达同一编译边界，让 writer 能访问 `&StateT` 和 `RuntimeContext` 后返回 `ChannelWriteEntry`。该实现暂不迁移 schema reader、`Send`、async 或 Runnable 生态。waiting edge 已按源项目 `attach_edge(starts, end)` 路径编译为 `NamedBarrierValue` join channel，目标节点订阅 join channel，各起点节点写入自己的节点名。
 
+## 16. PregelLoop 先保留同步主循环核心状态
+
+源项目 `PregelLoop` / `SyncPregelLoop` 同时承载运行时核心状态和 checkpoint、cache、store、interrupt、debug stream、retry、async executor、生命周期事件等平台能力。Rust 版当前只建立同步 `PregelLoop` 骨架，并从已有 `Pregel` 容器拆分借用 `nodes`、`channels`、`managed`、input/output/stream channels 和 trigger 索引等字段，贴近源项目向 `SyncPregelLoop` 传入 `nodes=self.nodes`、`specs=self.channels` 等字段的方式。
+
+Rust 版当前字段收敛为：
+
+```rust
+struct PregelLoop<'a, StateT, UpdateT, ContextT> {
+    nodes: &'a HashMap<String, PregelNode<StateT, UpdateT, ContextT>>,
+    channels: &'a mut HashMap<String, Box<DynChannel>>,
+    managed: &'a mut HashMap<String, Box<dyn ManagedValueSpec>>,
+    input_channels: &'a [String],
+    output_channels: &'a [String],
+    stream_channels: Option<&'a [String]>,
+    stream_mode: StreamMode,
+    recursion_limit: usize,
+    trigger_to_nodes: &'a HashMap<String, Vec<String>>,
+    name: &'a str,
+    input: Option<StateValue>,
+    step: usize,
+    stop: usize,
+    status: PregelLoopStatus,
+    task_manager: PregelTaskManager<StateT, UpdateT, ContextT>,
+    updated_channels: Option<HashSet<String>>,
+    output: Option<StateValue>,
+}
+```
+
+源项目的 `tasks: dict[str, PregelExecutableTask]` 在 Rust 版先映射为 `PregelTaskManager`，让任务集合、准备和执行边界集中在 task manager 中。`tick`、`execute`、`after_tick` 目前只是空方法，后续再分别接入准备任务、执行任务和应用 writes 的逻辑。
+
 ## 当前仍需谨慎的地方
 
 - 当前源码仍是骨架，很多类型未公开或未使用，warning 是预期状态。

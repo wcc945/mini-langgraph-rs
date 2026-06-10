@@ -23,7 +23,9 @@ pub(crate) struct PregelTaskManager<StateT, UpdateT, ContextT> {
 
 impl<StateT, UpdateT, ContextT> PregelTaskManager<StateT, UpdateT, ContextT> {
     pub(crate) fn new() -> Self {
-        todo!()
+        Self {
+            tasks: HashMap::new(),
+        }
     }
 
     pub(crate) fn submit_task(&mut self, _task: PregelExecutableTask<StateT, UpdateT, ContextT>) {
