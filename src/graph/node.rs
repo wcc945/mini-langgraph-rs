@@ -1,7 +1,7 @@
 use crate::error::GraphError;
 use crate::runtime::RuntimeContext;
 
-struct Command<UpdateT> {
+pub struct Command<UpdateT> {
     temp: UpdateT,
 }
 pub enum NodeOutput<UpdateT> {

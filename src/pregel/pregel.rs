@@ -1,15 +1,25 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::channel::DynChannel;
 use crate::error::GraphError;
 use crate::managed::ManagedValueSpec;
 use crate::pregel::consts::{DEFAULT_NAME, DEFAULT_RECURSION_LIMIT};
+use crate::pregel::loops::PregelLoop;
 use crate::pregel::node::PregelNode;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamMode {
     Values,
     Updates,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PregelStreamItem {
+    pub(crate) step: usize,
+    pub(crate) mode: StreamMode,
+    pub(crate) data: crate::channel::StateValue,
 }
 
 pub(crate) struct Pregel<StateT, UpdateT, ContextT> {
@@ -134,17 +144,103 @@ impl<StateT, UpdateT, ContextT> Pregel<StateT, UpdateT, ContextT> {
 
         trigger_to_nodes
     }
+
+    pub(crate) fn copy_channels(&self) -> Result<HashMap<String, Box<DynChannel>>, GraphError> {
+        self.channels
+            .iter()
+            .map(|(name, channel)| {
+                channel
+                    .copy_box()
+                    .map(|channel| (name.clone(), channel))
+                    .map_err(|error| GraphError::PregelChannelCopyFailed {
+                        channel: name.clone(),
+                        message: error.to_string(),
+                    })
+            })
+            .collect()
+    }
+
+    pub(crate) fn copy_managed(&self) -> HashMap<String, Box<dyn ManagedValueSpec>> {
+        self.managed
+            .iter()
+            .map(|(name, managed)| (name.clone(), managed.copy_box()))
+            .collect()
+    }
+}
+
+impl<StateT, UpdateT, ContextT> Pregel<StateT, UpdateT, ContextT>
+where
+    StateT: From<crate::channel::StateValue> + Send + 'static,
+    UpdateT: Into<crate::channel::StateValue> + Send + 'static,
+    ContextT: Default + Send + 'static,
+{
+    pub(crate) fn stream(
+        self: Arc<Self>,
+        input: Option<crate::channel::StateValue>,
+    ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError> {
+        let (sender, receiver) = mpsc::channel(16);
+
+        tokio::spawn(async move {
+            let new_error_sender = sender.clone();
+            let mut loop_state = match PregelLoop::new(&self, input, sender) {
+                Ok(loop_state) => loop_state,
+                Err(error) => {
+                    let _ = new_error_sender.send(Err(error)).await;
+                    return;
+                }
+            };
+
+            loop {
+                let should_continue = match loop_state.tick() {
+                    Ok(should_continue) => should_continue,
+                    Err(error) => {
+                        let _ = loop_state.stream_sender.send(Err(error)).await;
+                        break;
+                    }
+                };
+
+                if !should_continue {
+                    break;
+                }
+
+                if let Err(error) = loop_state.execute() {
+                    let _ = loop_state.stream_sender.send(Err(error)).await;
+                    break;
+                }
+
+                if let Err(error) = loop_state.after_tick().await {
+                    let _ = loop_state.stream_sender.send(Err(error)).await;
+                    break;
+                }
+
+                if loop_state.is_stream_closed() {
+                    break;
+                }
+            }
+        });
+
+        Ok(receiver)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel::StateValue;
+    use crate::channel::channel_writer::{
+        ChannelWriteEntry, ChannelWriteValue, ChannelWriter, ChannelWriterEntry,
+    };
     use crate::channel::last_value::LastValue;
     use crate::graph::node::NodeOutput;
+    use std::sync::Arc;
 
     struct TestManagedValue;
 
-    impl ManagedValueSpec for TestManagedValue {}
+    impl ManagedValueSpec for TestManagedValue {
+        fn copy_box(&self) -> Box<dyn ManagedValueSpec> {
+            Box::new(TestManagedValue)
+        }
+    }
 
     fn channel() -> Box<DynChannel> {
         Box::new(LastValue::new())
@@ -183,6 +279,63 @@ mod tests {
                 ("b", node(vec!["state"], vec!["state"])),
             ]),
             channels(&["input", "state", "output"]),
+            HashMap::new(),
+            vec!["input".to_string()],
+            vec!["output".to_string()],
+        )
+        .unwrap()
+    }
+
+    fn passthrough_writer(channel: &str) -> ChannelWriter<StateValue, ()> {
+        ChannelWriter::new(vec![ChannelWriterEntry::Channel(ChannelWriteEntry {
+            channel: channel.to_string(),
+            value: ChannelWriteValue::Passthrough,
+            skip_none: false,
+            mapper: None,
+        })])
+    }
+
+    fn trigger_writer(channel: &str) -> ChannelWriter<StateValue, ()> {
+        ChannelWriter::new(vec![ChannelWriterEntry::Channel(ChannelWriteEntry {
+            channel: channel.to_string(),
+            value: ChannelWriteValue::Value(StateValue::Null),
+            skip_none: false,
+            mapper: None,
+        })])
+    }
+
+    fn stream_pregel() -> Pregel<StateValue, StateValue, ()> {
+        Pregel::new(
+            HashMap::from([
+                (
+                    "a".to_string(),
+                    PregelNode::new(
+                        vec!["input".to_string()],
+                        vec!["input".to_string()],
+                        None,
+                        vec![passthrough_writer("mid"), trigger_writer("to_b")],
+                        Box::new(|_, _| {
+                            Ok(NodeOutput::Update(StateValue::String("a".to_string())))
+                        }),
+                    ),
+                ),
+                (
+                    "b".to_string(),
+                    PregelNode::new(
+                        vec!["mid".to_string()],
+                        vec!["to_b".to_string()],
+                        None,
+                        vec![passthrough_writer("output")],
+                        Box::new(|state, _| match state {
+                            StateValue::Object(values) => Ok(NodeOutput::Update(
+                                values.get("mid").cloned().unwrap_or(StateValue::Null),
+                            )),
+                            _ => Ok(NodeOutput::None),
+                        }),
+                    ),
+                ),
+            ]),
+            channels(&["input", "mid", "to_b", "output"]),
             HashMap::new(),
             vec!["input".to_string()],
             vec!["output".to_string()],
@@ -312,5 +465,15 @@ mod tests {
         let error = pregel.validate().unwrap_err();
 
         assert!(matches!(error, GraphError::InvalidPregelRecursionLimit(0)));
+    }
+
+    #[tokio::test]
+    async fn stream_returns_receiver_and_closes_without_loop_logic() {
+        let pregel = Arc::new(stream_pregel());
+        let mut receiver = pregel
+            .stream(Some(StateValue::String("start".to_string())))
+            .unwrap();
+
+        assert!(receiver.recv().await.is_none());
     }
 }

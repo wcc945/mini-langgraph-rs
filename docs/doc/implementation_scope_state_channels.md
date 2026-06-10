@@ -32,8 +32,8 @@
 - `ChannelWriter::assemble` 支持单 channel 的 `ChannelWriteEntry`、多 channel 的 `ChannelWriteTupleEntry` 和可执行 `ChannelExecutable`：单 channel entry 可处理固定值、passthrough 输出、mapper 转换、`SkipWrite` 和 `skip_none`；tuple entry 直接把节点返回值交给 mapper，再展开为多条 channel writes；executable entry 可读取当前 state 和 `RuntimeContext` 后返回动态 `ChannelWriteEntry`，用于表达条件分支 route writer。
 - `ChannelWriter::state_value` 提供最小 `Into<StateValue>` 转换入口，并支持 `bool`、数字、字符串、列表和 `HashMap<String, T>` 等常见 Rust 值转为 `StateValue`；暂不把 `Option<T>` 自动转为 `StateValue`，避免混淆 `None = 不写字段` 与显式 `StateValue::Null`。
 - `StateGraph` 当前的 channel 表使用 `channels: HashMap<String, Box<DynChannel>>`，对应源项目 `channels: dict[str, BaseChannel]` 的动态类型路线。
-- `src/managed/mod.rs` 已新增最小 `ManagedValueSpec` trait，`StateGraph` 已包含 `managed: HashMap<String, Box<dyn ManagedValueSpec>>`，对应源项目 `managed: dict[str, ManagedValueSpec]`；字段名保存在 `HashMap` key 中，spec 表示 managed value 的计算规格。
-- 已为 `ManagedValueSpec` 补充 marker trait 边界测试，确保测试实现满足 `Send + Sync` 约束。
+- `src/managed/mod.rs` 已新增最小 `ManagedValueSpec` trait，`StateGraph` 已包含 `managed: HashMap<String, Box<dyn ManagedValueSpec>>`，对应源项目 `managed: dict[str, ManagedValueSpec]`；字段名保存在 `HashMap` key 中，spec 表示 managed value 的计算规格。trait 当前包含对象安全 `copy_box()`，供每次 `PregelLoop` 创建运行态副本。
+- 已为 `ManagedValueSpec` 补充 marker trait 边界和 boxed copy 测试，确保测试实现满足 `Send + Sync` 约束并能复制 trait object。
 - `src/graph/schema.rs` 已新增 crate 内部手写 `StateSchema` trait，作为源项目 `_add_schema(self.state_schema)` 的 Rust 版最小入口；`StateGraph::with_schema()` 会调用 `StateT::channels()` 和 `StateT::managed()` 自动填充 builder 的 state channel 与 managed value 表，`StateGraph::new()` 仍保持空 builder 语义。
 - `GraphError` 已补充 `EmptyChannel`、多值写入、非法 channel update 和非法 barrier value 等错误，用于 channel 读取空值和更新失败时返回结构化错误。
 - 节点返回的局部更新暂由泛型 `UpdateT` 表达，框架还没有固定内置 `Update` 结构。
@@ -44,7 +44,7 @@
 
 - `BinaryOperatorAggregate` 当前不实现 Python 版 `Overwrite` 特性。
 - `StateValue` 目前只是最小动态值枚举，尚未和用户 `StateT` / `UpdateT` 建立转换协议。
-- `ManagedValueSpec` 当前只是空 trait 边界，尚未实现源项目 `ManagedValue.get(scratchpad)` 的 scratchpad 读取语义。
+- `ManagedValueSpec` 当前只有复制规格的能力，尚未实现源项目 `ManagedValue.get(scratchpad)` 的 scratchpad 读取语义。
 - `StateSchema` 目前是 crate 内部能力，需要手写 channel / managed 表；尚未提供 `derive` 宏，也不从 Rust 结构体字段自动推断默认 `LastValue` channel。若后续要作为外部公共 API，需要同步公开 channel 和 managed 类型。
 - `BaseChannel::checkpoint` 目前要求具体 channel 实现，尚未提供等价源项目“默认调用 get，空 channel 返回 missing”的通用 sentinel 机制。
 - `UpdateT` 与 `StateT` 的合并协议尚未确定；后续可在动态字段更新、手写强类型 update 或宏生成 update 之间选择。

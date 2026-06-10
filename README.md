@@ -38,6 +38,8 @@ src/lib.rs
 ```text
 src/graph/      # StateGraph、节点、条件边、waiting edge 与 START / END 常量
 src/channel/    # BaseChannel、StateValue、基础 channel 与 ChannelWriter 写入组装
+src/managed/    # ManagedValueSpec 规格与每次运行复制边界
+src/pregel/     # Pregel 容器、loop 骨架、task 骨架与 stream 管道边界
 src/runtime/    # 节点执行上下文 RuntimeContext
 src/error.rs    # 图构建与运行时错误类型边界
 ```
@@ -49,7 +51,7 @@ src/state/      # 状态 update、字段合并和 reducer 协议
 src/checkpoint/ # 可恢复执行能力的边界预留
 ```
 
-当前代码仍处于骨架阶段，`add_node`、`add_edge`、`add_conditional_edges`、`add_sequence`、`compile` 和 Pregel 容器校验已具备 MVP；`invoke`、`stream` 和完整 superstep 调度尚未实现。channel 侧已具备 `LastValue`、`BinaryOperatorAggregate`、`EphemeralValue`、`NamedBarrierValue` 和 `ChannelWriter::assemble` 的 MVP；后续 runtime 仍需把 task writes 按 channel 聚合并调用 channel `update(values)`。
+当前代码仍处于骨架阶段，`add_node`、`add_edge`、`add_conditional_edges`、`add_sequence`、`compile` 和 Pregel 容器校验已具备 MVP；`stream` 已接入 `tokio::sync::mpsc` 管道和后台 task 创建边界，`PregelLoop::new` 会为每次运行复制 `channels` 与 `managed`，并以引用使用 nodes、输入输出 channel 配置、stream 配置、trigger 索引和 name 等图规格字段。`invoke` 和完整 superstep 调度尚未实现，`PregelLoop` / `PregelTaskManager` 除 `new` 外仍是运行逻辑桩。channel 侧已具备 `LastValue`、`BinaryOperatorAggregate`、`EphemeralValue`、`NamedBarrierValue` 和 `ChannelWriter::assemble` 的 MVP；后续 runtime 仍需把 task writes 按 channel 聚合并调用 channel `update(values)`。
 
 ## 功能对比
 
@@ -69,7 +71,7 @@ src/checkpoint/ # 可恢复执行能力的边界预留
 | `set_entry_point` / `set_finish_point` | √ | √ |
 | `compile()` 生成可执行图容器 | √ | √ |
 | `invoke()` 一次性执行图 | √ | × |
-| `stream()` 流式执行图 | √ | × |
+| `stream()` 流式执行图 | √ | ×（已有 mpsc receiver 边界，尚无 superstep 输出） |
 | 异步执行 `ainvoke()` / `astream()` | √ | × |
 | Pregel superstep 调度循环 | √ | × |
 | 节点局部状态更新 `State -> Partial<State>` | √ | × |
@@ -81,6 +83,7 @@ src/checkpoint/ # 可恢复执行能力的边界预留
 | `StateSchema` 推导 state channel / managed value | √ | √ |
 | 从 Python/Rust 类型字段自动推断 schema | √ | × |
 | managed value 运行时读取 | √ | × |
+| 每次运行复制 channel / managed 运行态 | √ | √ |
 | 运行时上下文注入 | √ | × |
 | `Command(update/goto/resume/graph)` 执行语义 | √ | × |
 | `Send` 动态并行分发 | √ | × |

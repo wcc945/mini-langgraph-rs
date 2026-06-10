@@ -21,7 +21,7 @@ pub(crate) mod ephemeral_value;
 pub(crate) mod last_value;
 pub(crate) mod named_barrier_value;
 
-pub(crate) trait BaseChannel {
+pub(crate) trait BaseChannel: Send + Sync {
     type Value;
     type Update;
     type Checkpoint;
@@ -36,6 +36,8 @@ pub(crate) trait BaseChannel {
     {
         self.from_checkpoint(self.checkpoint()?)
     }
+
+    fn copy_box(&self) -> Result<Box<DynChannel>, GraphError>;
 
     fn checkpoint(&self) -> Result<Option<Self::Checkpoint>, GraphError>;
 
@@ -91,6 +93,10 @@ mod tests {
             checkpoint: Option<Self::Checkpoint>,
         ) -> Result<Self, GraphError> {
             Ok(Self { value: checkpoint })
+        }
+
+        fn copy_box(&self) -> Result<Box<DynChannel>, GraphError> {
+            Ok(Box::new(self.copy()?))
         }
 
         fn get(&self) -> Result<Self::Value, GraphError> {

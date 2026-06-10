@@ -156,7 +156,9 @@ managed: dict[str, ManagedValueSpec]
 Rust 版当前用 trait object 方向表达：
 
 ```rust
-trait ManagedValueSpec: Send + Sync {}
+trait ManagedValueSpec: Send + Sync {
+    fn copy_box(&self) -> Box<dyn ManagedValueSpec>;
+}
 ```
 
 并在 `StateGraph` 中保存：
@@ -255,7 +257,7 @@ struct PregelExecutableTask<StateT, UpdateT, ContextT> {
 }
 ```
 
-其中 `bound` 保存节点主逻辑，`writers` 保存节点写入器，`writes` 保存执行期间产生的 pending writes；三者在任务结构中显式拆开，不再通过 `proc: PregelNode` 间接承载。`id`、`path` 和 `writes` 直接使用标准集合类型，不额外定义类型别名。`PregelTaskManager` 内部用 `HashMap<String, PregelExecutableTask<...>>` 按任务 id 索引任务；当前只提供提交任务、准备任务、准备单个任务和执行任务的方法桩，后续实现 `stream()` 时再填充具体行为。`config`、`retry_policy`、`cache_key`、`subgraphs` 和 `timeout` 暂不迁移，避免在基本调度循环完成前引入策略层复杂度。
+其中 `bound` 保存节点主逻辑，`writers` 保存节点写入器，`writes` 保存执行期间产生的 pending writes；三者在任务结构中显式拆开，不再通过 `proc: PregelNode` 间接承载。`id`、`path` 和 `writes` 直接使用标准集合类型，不额外定义类型别名。`PregelTaskManager` 内部用 `HashMap<String, PregelExecutableTask<...>>` 按任务 id 索引任务，当前已能提交、稳定取出、构造并执行任务。`config`、`retry_policy`、`cache_key`、`subgraphs` 和 `timeout` 暂不迁移，避免在基本调度循环完成前引入策略层复杂度。
 
 ## 14. Pregel 先实现容器和校验，不提前复制运行时生态
 
@@ -278,7 +280,7 @@ struct Pregel<StateT, UpdateT, ContextT> {
 }
 ```
 
-源项目的 `channels: dict[str, BaseChannel | ManagedValueSpec]` 在 Rust 版拆成 `channels` 和 `managed` 两张表，以保留动态 channel map 的同时避免把 managed value 当作普通 channel 更新。当前 `Pregel::validate` 只迁移 `validate_graph` 的最小结构校验，并重建 `trigger_to_nodes`；`invoke`、`stream`、checkpoint、interrupt/resume 等能力仍暂缓。
+源项目的 `channels: dict[str, BaseChannel | ManagedValueSpec]` 在 Rust 版拆成 `channels` 和 `managed` 两张表，以保留动态 channel map 的同时避免把 managed value 当作普通 channel 更新。当前 `Pregel::validate` 只迁移 `validate_graph` 的最小结构校验，并重建 `trigger_to_nodes`；`stream` 已接入最小 Tokio mpsc 管道和 loop 构造边界，`invoke`、checkpoint、interrupt/resume 等能力仍暂缓。
 
 ## 15. CompiledStateGraph 先固定编译装配边界
 
@@ -296,35 +298,23 @@ pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
 
 当前不复制源项目的完整 checkpoint 或 stream 路径；`PregelNode.bound` 直接复用 builder 中的节点函数，`mapper` 暂不接入真实状态投影协议。源项目通过 `ChannelWrite.register_writer(branch.run(...))` 把分支 runnable 标记为 writer；Rust 版用泛型可执行 `ChannelWriter` 表达同一编译边界，让 writer 能访问 `&StateT` 和 `RuntimeContext` 后返回 `ChannelWriteEntry`。该实现暂不迁移 schema reader、`Send`、async 或 Runnable 生态。waiting edge 已按源项目 `attach_edge(starts, end)` 路径编译为 `NamedBarrierValue` join channel，目标节点订阅 join channel，各起点节点写入自己的节点名。
 
-## 16. PregelLoop 先保留同步主循环核心状态
+## 16. PregelLoop 持有每次运行的独立状态
 
-源项目 `PregelLoop` / `SyncPregelLoop` 同时承载运行时核心状态和 checkpoint、cache、store、interrupt、debug stream、retry、async executor、生命周期事件等平台能力。Rust 版当前只建立同步 `PregelLoop` 骨架，并从已有 `Pregel` 容器拆分借用 `nodes`、`channels`、`managed`、input/output/stream channels 和 trigger 索引等字段，贴近源项目向 `SyncPregelLoop` 传入 `nodes=self.nodes`、`specs=self.channels` 等字段的方式。
+源项目 `PregelLoop` / `SyncPregelLoop` 同时承载运行时核心状态和 checkpoint、cache、store、interrupt、debug stream、retry、async executor、生命周期事件等平台能力。Rust 版当前只实现同步 Pregel 主线需要的运行态，并把图规格与运行状态分开：`Pregel` 保存 nodes、channel 原型和配置，`PregelLoop` 持有本次运行复制出的 channels、step、pending writes、updated channels 和输出缓存。
 
-Rust 版当前字段收敛为：
+当前 `PregelLoop::new` 从 `Pregel.channels` 和 `Pregel.managed` 复制本次运行专用 map，不再借用或共享这两类运行态。`tick`、`execute`、`after_tick` 和 `is_stream_closed` 目前只保留接口形状，不实现真实调度、执行、更新或发送逻辑；后续补实现时应保持源项目语义：`tick` 只返回是否继续，`execute` 和 `after_tick` 不把 stream chunk 作为返回值暴露给外层，发送动作由 loop 持有的 sender 内部完成。
 
-```rust
-struct PregelLoop<'a, StateT, UpdateT, ContextT> {
-    nodes: &'a HashMap<String, PregelNode<StateT, UpdateT, ContextT>>,
-    channels: &'a mut HashMap<String, Box<DynChannel>>,
-    managed: &'a mut HashMap<String, Box<dyn ManagedValueSpec>>,
-    input_channels: &'a [String],
-    output_channels: &'a [String],
-    stream_channels: Option<&'a [String]>,
-    stream_mode: StreamMode,
-    recursion_limit: usize,
-    trigger_to_nodes: &'a HashMap<String, Vec<String>>,
-    name: &'a str,
-    input: Option<StateValue>,
-    step: usize,
-    stop: usize,
-    status: PregelLoopStatus,
-    task_manager: PregelTaskManager<StateT, UpdateT, ContextT>,
-    updated_channels: Option<HashSet<String>>,
-    output: Option<StateValue>,
-}
-```
+源项目的 `tasks: dict[str, PregelExecutableTask]` 在 Rust 版映射为 `PregelTaskManager`，让任务集合、准备和执行边界集中在 task manager 中。当前暂不迁移 retry、cache、timeout、interrupt、debug stream 和 checkpoint 语义。
 
-源项目的 `tasks: dict[str, PregelExecutableTask]` 在 Rust 版先映射为 `PregelTaskManager`，让任务集合、准备和执行边界集中在 task manager 中。`tick`、`execute`、`after_tick` 目前只是空方法，后续再分别接入准备任务、执行任务和应用 writes 的逻辑。
+## 17. Tokio mpsc stream 采用每次运行独立 channel map
+
+源项目 `Pregel` 上的 `channels` 更接近图规格，真正执行时由 `SyncPregelLoop` 为本次运行准备独立 channel 和 managed 状态。Rust 版对齐这个边界：`Pregel.channels` 保存 channel 原型，`Pregel.managed` 保存 managed 规格，`PregelLoop::new` 通过 `copy_box()` 为每次 `stream()` 创建新的 `HashMap<String, Box<DynChannel>>` 和 `HashMap<String, Box<dyn ManagedValueSpec>>`。nodes、input/output/stream channels、stream mode、trigger 索引和 name 等图规格字段在 loop 中只通过引用使用，不为每次 loop 克隆。
+
+channel 的 `copy_box()` 是现有 `BaseChannel::copy()` 的 trait object 版本，具体复制语义仍来自 channel 自身的 `checkpoint()` + `from_checkpoint()`。因此 `LastValue`、`EphemeralValue`、`BinaryOperatorAggregate` 和 `NamedBarrierValue` 都能复用已有 checkpoint 恢复逻辑。managed 的 `copy_box()` 暂只复制 managed spec object，scratchpad 读取语义后续再补。
+
+Rust 版 `stream()` 使用 `tokio::sync::mpsc` 返回 receiver，并由后台 task 创建 `PregelLoop`。为了让后台 task 持有图规格，`CompiledStateGraph` 内部保存 `Arc<Pregel>`；`stream(&self)` 只 clone `Arc` 指针，后台 task 内部创建的 `PregelLoop` 再借用 `Pregel` 中的规格字段。`PregelNode` 和 `ChannelWriter` 本身不需要实现 `Clone`。当前不使用 `Arc<Mutex<channels>>`，连续或并发的 `stream()` 调用不会互相污染 channel 或 managed 状态。
+
+当前节点执行仍是同步闭包，Tokio 只负责后台任务和管道发送。`stream()` 的类型边界暂时要求 `StateT: From<StateValue>`、`UpdateT: Into<StateValue>`、`ContextT: Default`，后续接入 typed state mapper 后再放宽或替换这组 MVP 约束。
 
 ## 当前仍需谨慎的地方
 

@@ -1,8 +1,7 @@
-use std::collections::HashMap;
-
 use crate::channel::StateValue;
 use crate::error::GraphError;
 use crate::runtime::RuntimeContext;
+use std::collections::HashMap;
 
 pub(crate) struct ChannelWriter<StateT, ContextT> {
     entries: Vec<ChannelWriterEntry<StateT, ContextT>>,
@@ -32,15 +31,17 @@ pub(crate) enum ChannelWriteValue {
 }
 
 pub(crate) type ChannelMapper =
-    Box<dyn Fn(StateValue) -> Result<ChannelWriteValue, GraphError> + Send + Sync>;
+    Box<dyn Fn(StateValue) -> Result<ChannelWriteValue, GraphError> + Send + Sync + 'static>;
 
-pub(crate) type ChannelTupleMapper =
-    Box<dyn Fn(StateValue) -> Result<Vec<(String, StateValue)>, GraphError> + Send + Sync>;
+pub(crate) type ChannelTupleMapper = Box<
+    dyn Fn(StateValue) -> Result<Vec<(String, StateValue)>, GraphError> + Send + Sync + 'static,
+>;
 
 pub(crate) type ChannelExecutable<StateT, ContextT> = Box<
     dyn Fn(&StateT, &mut RuntimeContext<ContextT>) -> Result<Vec<ChannelWriteEntry>, GraphError>
         + Send
-        + Sync,
+        + Sync
+        + 'static,
 >;
 
 impl<StateT, ContextT> ChannelWriter<StateT, ContextT> {

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use crate::channel::channel_writer::{
     ChannelTupleMapper, ChannelWriteEntry, ChannelWriteTupleEntry, ChannelWriteValue,
@@ -14,10 +15,11 @@ use crate::graph::consts::{END, START};
 use crate::graph::node::{NodeOutput, StateNodeSpec};
 use crate::managed::ManagedValueSpec;
 use crate::pregel::node::PregelNode;
-use crate::pregel::pregel::{Pregel, StreamMode};
+use crate::pregel::pregel::{Pregel, PregelStreamItem, StreamMode};
+use tokio::sync::mpsc;
 
 pub struct CompiledStateGraph<StateT, UpdateT, ContextT = (), InputT = StateT, OutputT = StateT> {
-    pub(crate) pregel: Pregel<StateT, UpdateT, ContextT>,
+    pub(crate) pregel: Arc<Pregel<StateT, UpdateT, ContextT>>,
     _marker: PhantomData<(InputT, OutputT)>,
 }
 
@@ -33,7 +35,7 @@ where
         output_channels: Vec<String>,
     ) -> Self {
         Self {
-            pregel: Pregel {
+            pregel: Arc::new(Pregel {
                 nodes: HashMap::new(),
                 channels,
                 managed,
@@ -44,9 +46,13 @@ where
                 recursion_limit: 25,
                 trigger_to_nodes: HashMap::new(),
                 name: "LangGraph".to_string(),
-            },
+            }),
             _marker: PhantomData,
         }
+    }
+
+    fn pregel_mut(&mut self) -> &mut Pregel<StateT, UpdateT, ContextT> {
+        Arc::get_mut(&mut self.pregel).expect("compiled graph spec is shared during construction")
     }
 
     pub(crate) fn attach_node(
@@ -55,11 +61,11 @@ where
         node: Option<StateNodeSpec<StateT, UpdateT, ContextT>>,
     ) {
         if key == START {
-            self.pregel
+            self.pregel_mut()
                 .channels
                 .entry(START.to_string())
                 .or_insert_with(|| Box::new(EphemeralValue::new(false)) as Box<DynChannel>);
-            self.pregel.nodes.insert(
+            self.pregel_mut().nodes.insert(
                 key,
                 PregelNode::new(
                     vec![START.to_string()],
@@ -79,12 +85,12 @@ where
         let read_channels = self.node_read_channels();
         let writers = vec![Self::state_writer(read_channels.clone())];
         let trigger = Self::branch_trigger_channel(&key);
-        self.pregel
+        self.pregel_mut()
             .channels
             .entry(trigger.clone())
             .or_insert_with(|| Box::new(EphemeralValue::new(false)) as Box<DynChannel>);
 
-        self.pregel.nodes.insert(
+        self.pregel_mut().nodes.insert(
             key,
             PregelNode::new(read_channels, vec![trigger], None, writers, node.runnable),
         );
@@ -98,19 +104,19 @@ where
         if starts.len() > 1 {
             let trigger = Self::join_trigger_channel(&starts, end);
 
-            self.pregel.channels.insert(
+            self.pregel_mut().channels.insert(
                 trigger.clone(),
                 Box::new(NamedBarrierValue::new(starts.iter().cloned())) as Box<DynChannel>,
             );
 
-            if let Some(node) = self.pregel.nodes.get_mut(end) {
+            if let Some(node) = self.pregel_mut().nodes.get_mut(end) {
                 node.triggers.push(trigger.clone());
                 node.triggers.sort();
                 node.triggers.dedup();
             }
 
             for start in starts {
-                if let Some(node) = self.pregel.nodes.get_mut(&start) {
+                if let Some(node) = self.pregel_mut().nodes.get_mut(&start) {
                     node.writers.push(Self::trigger_writer(
                         trigger.clone(),
                         StateValue::String(start),
@@ -124,7 +130,7 @@ where
         let start = &starts[0];
         let trigger = Self::branch_trigger_channel(end);
 
-        if let Some(node) = self.pregel.nodes.get_mut(start) {
+        if let Some(node) = self.pregel_mut().nodes.get_mut(start) {
             node.writers
                 .push(Self::trigger_writer(trigger, StateValue::Null));
         }
@@ -138,7 +144,7 @@ where
     ) -> Result<(), GraphError> {
         let writer = Self::branch_writer(branch);
 
-        let Some(node) = self.pregel.nodes.get_mut(start) else {
+        let Some(node) = self.pregel_mut().nodes.get_mut(start) else {
             return Err(GraphError::UnknownEdgeSource(start.to_string()));
         };
 
@@ -148,8 +154,20 @@ where
     }
 
     pub(crate) fn validate(mut self) -> Result<Self, GraphError> {
-        self.pregel.validate()?;
+        self.pregel_mut().validate()?;
         Ok(self)
+    }
+
+    pub(crate) fn stream(
+        &self,
+        input: Option<StateValue>,
+    ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError>
+    where
+        StateT: From<StateValue> + Send + 'static,
+        UpdateT: Into<StateValue> + Send + 'static,
+        ContextT: Default + Send + 'static,
+    {
+        Arc::clone(&self.pregel).stream(input)
     }
 
     fn branch_trigger_channel(target: &str) -> String {

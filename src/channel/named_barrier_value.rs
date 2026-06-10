@@ -72,6 +72,10 @@ impl BaseChannel for NamedBarrierValue {
         })
     }
 
+    fn copy_box(&self) -> Result<Box<crate::channel::DynChannel>, GraphError> {
+        Ok(Box::new(self.copy()?))
+    }
+
     fn get(&self) -> Result<Self::Value, GraphError> {
         if self.is_available() {
             Ok(StateValue::Null)

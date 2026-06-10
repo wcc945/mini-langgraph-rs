@@ -32,6 +32,10 @@ impl BaseChannel for LastValue {
         Ok(Self { value: checkpoint })
     }
 
+    fn copy_box(&self) -> Result<Box<crate::channel::DynChannel>, GraphError> {
+        Ok(Box::new(self.copy()?))
+    }
+
     fn get(&self) -> Result<Self::Value, GraphError> {
         self.value.clone().ok_or(GraphError::EmptyChannel)
     }

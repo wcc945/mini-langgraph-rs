@@ -359,7 +359,11 @@ mod tests {
 
     struct TestManagedValue;
 
-    impl ManagedValueSpec for TestManagedValue {}
+    impl ManagedValueSpec for TestManagedValue {
+        fn copy_box(&self) -> Box<dyn ManagedValueSpec> {
+            Box::new(TestManagedValue)
+        }
+    }
 
     struct TestSchema;
 

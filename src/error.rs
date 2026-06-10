@@ -85,6 +85,18 @@ pub enum GraphError {
     #[error("Pregel recursion limit must be greater than 0, got {0}")]
     InvalidPregelRecursionLimit(usize),
 
+    #[error("Pregel recursion limit of {0} was reached")]
+    PregelRecursionLimitReached(usize),
+
+    #[error("Pregel task `{node}` failed: {message}")]
+    PregelTaskFailed { node: String, message: String },
+
+    #[error("Pregel node output command is not supported yet")]
+    UnsupportedPregelCommand,
+
+    #[error("Pregel stream failed to copy channel `{channel}`: {message}")]
+    PregelChannelCopyFailed { channel: String, message: String },
+
     #[error("compile does not support conditional branches yet")]
     UnsupportedCompiledBranches,
 }

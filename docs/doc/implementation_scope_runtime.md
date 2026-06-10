@@ -30,28 +30,29 @@
 - 节点函数签名已经预留 `&mut RuntimeContext<ContextT>` 参数，用于后续承载 runtime、config、writer、store、执行元数据等运行时信息。
 - `src/pregel/node.rs` 已实现 `PregelNode` MVP，作为后续组装可执行 task 的运行时节点容器；当前保存输入 `channels: Vec<String>`、触发 `triggers`、可选输入 `mapper`、输出 `writers` 和主逻辑 `bound`。
 - `PregelNodeBound<StateT, UpdateT, ContextT>` 的节点主逻辑签名对齐 `graph::node::NodeFn`，返回 `NodeOutput<UpdateT>`；当前不预置源项目 `DEFAULT_BOUND` 等默认执行逻辑。
-- `src/pregel/task.rs` 已重建为更贴近源项目 `PregelExecutableTask` 的最小任务骨架：`PregelExecutableTask` 保存任务名、输入、待执行 `bound`、pending writes、writers、triggers、id 和 path；`PregelTaskManager` 内部按任务 id 保存任务 map，并只保留提交任务、准备任务、准备单个任务和执行任务的方法桩，方法体暂为 `todo!()`。
-- `src/pregel/loops.rs` 已新增同步 `PregelLoop` 骨架，参考源项目 `PregelLoop` / `SyncPregelLoop` 保留当前项目可承载的核心字段：从 `Pregel` 拆分借用的 nodes、channels、managed、input/output/stream channels、stream mode、trigger 索引和 name，以及输入、step、stop、status、`PregelTaskManager`、updated channels 和 output。源项目的 `tasks` 字段在 Rust 版先收敛为 `PregelTaskManager`，三个方法 `tick`、`execute`、`after_tick` 当前为空方法。
+- `src/pregel/task.rs` 已保留任务结构边界：`PregelExecutableTask` 保存任务名、输入、待执行 `bound` 引用、pending writes、writers 引用、triggers 引用、id 和 path；`PregelTaskManager::new` 初始化任务表。除 `new` 外的任务提交、准备和执行方法当前暂不实现真实运行逻辑。
+- `src/pregel/loops.rs` 已保留最小同步 Pregel loop 构造边界。`PregelLoop::new` 会从 `Pregel.channels` 和 `Pregel.managed` 通过 `copy_box()` 复制出本次运行专用 channel map 与 managed map；nodes、input/output/stream channels、stream mode、trigger 索引和 name 等图规格字段在 loop 中使用引用；`tick`、`execute`、`after_tick` 和 `is_stream_closed` 当前暂不实现真实调度、执行、更新或发送逻辑。
 - `src/pregel/pregel.rs` 已实现 `Pregel` MVP 容器，保存 `nodes`、`channels`、`managed`、`input_channels`、`output_channels`、`stream_channels`、`stream_mode`、`recursion_limit`、`trigger_to_nodes` 和 `name`。
 - `Pregel::validate` 已实现源项目 `validate_graph` 的最小 Rust 版校验：检查节点读取 channel、trigger channel、input/output/stream channel 是否存在，要求至少一个 input channel 被节点订阅，并重建 `trigger_to_nodes`。
-- `CompiledStateGraph` 已能由 `StateGraph::compile()` 生成，并持有可校验的 `Pregel` 容器；当前自身只负责编译装配，不实现 `invoke` 或 `stream`。
+- `CompiledStateGraph` 已能由 `StateGraph::compile()` 生成，并持有可校验的 `Pregel` 容器；当前已提供 `stream` 转发到内部 `Pregel::stream`，但仍未实现 `invoke`。
 - `CompiledStateGraph::attach_node` 已接入 `START` 入口节点和用户节点：`START` 节点订阅 `START` input channel，用户节点读取所有 state channel 和 managed value，安装最小 state writer，并创建和订阅 `branch:to:{node}` trigger channel；`attach_edge` 已接入普通边控制流 writer 和多起点 join barrier channel；`attach_branch` 已把单目标条件分支封装为可执行 `ChannelWriter`，用于按路由结果写入 `branch:to:{target}`。
 - `CompiledStateGraph` 当前将 `stream_channels` 默认设置为与 `output_channels` 相同的 state channel 集合；这对应源项目 `StateGraph.compile()` 会显式传入 stream channels 的路径。
 - `src/error.rs` 已定义公共 `GraphError` 类型，当前覆盖 channel 空读、分支解析错误和构图阶段的基础结构错误。
-- channel 写入层已具备 `ChannelWriter::assemble`，当前 `CompiledStateGraph::attach_edge` 会为普通边注册控制流 writer，`attach_branch` 会注册可执行条件分支 writer。后续 task 执行节点后应把节点输出、当前 state 和 `RuntimeContext` 一起传给节点 writers，把组装出的 `(channel, StateValue)` 追加到 task writes。runtime 的 Update 阶段再统一按 channel 聚合同轮 writes，调用对应 channel 的 `update(values)`，并依据返回值维护 changed channel 集合。
+- channel 写入层已具备 `ChannelWriter::assemble`，当前 `CompiledStateGraph::attach_edge` 会为普通边注册控制流 writer，`attach_branch` 会注册可执行条件分支 writer。task 执行节点后会把节点输出、当前 state 和 `RuntimeContext` 一起传给节点 writers，把组装出的 `(channel, StateValue)` 追加到 task writes。runtime 的 Update 阶段再统一按 channel 聚合同轮 writes，调用对应 channel 的 `update(values)`，并依据返回值维护 changed channel 集合。
+- `Pregel::stream(input)` 已使用 `tokio::sync::mpsc` 返回管道 receiver，并由后台 task 建立 `PregelLoop`。`tick` 保持返回是否继续的接口，`execute` 和 `after_tick` 不返回 stream chunk；真实调度和发送语义后续再补。`CompiledStateGraph` 通过 `Arc<Pregel>` 让后台 task 持有图规格，实际 loop 仍借用规格字段；每次运行复制 channels 和 managed，避免不同 stream 调用共享可变运行态。
 - 已为 `RuntimeContext` 用户上下文字段和 `GraphError` 展示文本补充基础单元测试。
 
 ## 当前未完成
 
-- `invoke`、`stream`、superstep 调度、节点执行、节点写入收集和下一轮可见性尚未实现；当前 `Pregel`、`PregelLoop` 和 `CompiledStateGraph` 只提供容器、配置、装配和校验能力。
-- `task.rs` 中的 `PregelExecutableTask` / `PregelTaskManager` 仍未接入 `Pregel` 主循环；后续需要在实现 `stream()` 时填充任务提交、准备、执行、写入转换和 step 汇总逻辑。
+- `invoke` 尚未实现；`stream()` 当前只暴露管道和 loop 构造边界，尚未提供同步 Pregel 主循环的真实执行结果。
 - `PregelNode.channels` 已由 `CompiledStateGraph::attach_node` 填入所有 state channel 和 managed value；`mapper` 仍未接入真实节点级输入投影。
 - `NodeOutput::Command` 的运行时解释尚未实现。
 - 条件边和 waiting edge 已能编译为 writer / trigger / barrier channel，但还没有完整运行时调度验证；checkpoint、interrupt/resume 尚未接入运行时。
+- 当前 `stream()` 的类型边界要求 `StateT: From<StateValue>`、`UpdateT: Into<StateValue>`、`ContextT: Default`，后续需要接入更完整的 typed state mapper 和 runtime context 传入机制。
 
 ## 暂缓
 
-- async 执行接口。
+- async 节点执行接口。
 - 远程图、子进程执行器或线程池优化。
 - streaming transformer 与多种输出协议。
 - retry、cache、timeout 的完整运行时策略。
