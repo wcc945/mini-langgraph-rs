@@ -236,7 +236,28 @@ struct PregelNode<ContextT> {
 
 其中 `channels` 先统一保存为 `Vec<String>`，不额外建模源项目 `channels: str | list[str]` 的单值分支；`PregelNodeBound` 的签名对齐 `graph::node::NodeFn`，返回 `NodeOutput<UpdateT>`；当前不预置源项目 `DEFAULT_BOUND` 等默认执行逻辑。`retry`、`cache`、`timeout`、tracing metadata、subgraph 发现和 error handler 暂不迁移，避免在同步 Pregel 主线尚未完成前引入策略层复杂度。
 
-## 13. Pregel 先实现容器和校验，不提前复制运行时生态
+## 13. PregelExecutableTask 先对齐核心执行字段
+
+源项目 `PregelExecutableTask` 同时保存执行本体和多种运行时策略字段：`name`、`input`、`proc`、`writes`、`config`、`triggers`、`retry_policy`、`cache_key`、`id`、`path`、`writers`、`subgraphs` 和 `timeout`。
+
+Rust 版当前只保留后续同步 Pregel 主循环直接需要的核心字段：
+
+```rust
+struct PregelExecutableTask<StateT, UpdateT, ContextT> {
+    name: String,
+    input: StateT,
+    bound: PregelNodeBound<StateT, UpdateT, ContextT>,
+    writes: Vec<(String, StateValue)>,
+    writers: Vec<ChannelWriter<StateT, ContextT>>,
+    triggers: Vec<String>,
+    id: String,
+    path: Vec<String>,
+}
+```
+
+其中 `bound` 保存节点主逻辑，`writers` 保存节点写入器，`writes` 保存执行期间产生的 pending writes；三者在任务结构中显式拆开，不再通过 `proc: PregelNode` 间接承载。`id`、`path` 和 `writes` 直接使用标准集合类型，不额外定义类型别名。`PregelTaskManager` 内部用 `HashMap<String, PregelExecutableTask<...>>` 按任务 id 索引任务；当前只提供提交任务、准备任务、准备单个任务和执行任务的方法桩，后续实现 `stream()` 时再填充具体行为。`config`、`retry_policy`、`cache_key`、`subgraphs` 和 `timeout` 暂不迁移，避免在基本调度循环完成前引入策略层复杂度。
+
+## 14. Pregel 先实现容器和校验，不提前复制运行时生态
 
 源项目 `Pregel` 同时承载核心运行时状态和大量平台/生态能力，例如 checkpoint、store、cache、retry、timeout、interrupt、debug event、schema/jsonschema、subgraph 和 stream transformer。
 
@@ -259,7 +280,7 @@ struct Pregel<StateT, UpdateT, ContextT> {
 
 源项目的 `channels: dict[str, BaseChannel | ManagedValueSpec]` 在 Rust 版拆成 `channels` 和 `managed` 两张表，以保留动态 channel map 的同时避免把 managed value 当作普通 channel 更新。当前 `Pregel::validate` 只迁移 `validate_graph` 的最小结构校验，并重建 `trigger_to_nodes`；`invoke`、`stream`、checkpoint、interrupt/resume 等能力仍暂缓。
 
-## 14. CompiledStateGraph 先固定编译装配边界
+## 15. CompiledStateGraph 先固定编译装配边界
 
 源项目 `CompiledStateGraph.compile()` 会在编译期完整接入 `attach_node`、`attach_edge`、`attach_branch`、state update writer、branch writer、join barrier channel、schema mapper 和 Pregel 运行时配置。
 

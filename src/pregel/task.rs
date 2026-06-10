@@ -1,97 +1,51 @@
+use std::collections::HashMap;
+
 use crate::channel::StateValue;
+use crate::channel::channel_writer::ChannelWriter;
+use crate::error::GraphError;
 use crate::graph::node::NodeOutput;
+use crate::pregel::node::PregelNodeBound;
 
-pub(crate) type TaskId = String;
-pub(crate) type TaskPath = Vec<String>;
-pub(crate) type TaskWrite = (String, StateValue);
-
-pub(crate) struct PregelTask<StateT> {
-    pub(crate) id: TaskId,
+pub(crate) struct PregelExecutableTask<StateT, UpdateT, ContextT> {
     pub(crate) name: String,
-    pub(crate) path: TaskPath,
     pub(crate) input: StateT,
+    pub(crate) bound: PregelNodeBound<StateT, UpdateT, ContextT>,
+    pub(crate) writes: Vec<(String, StateValue)>,
+    pub(crate) writers: Vec<ChannelWriter<StateT, ContextT>>,
     pub(crate) triggers: Vec<String>,
+    pub(crate) id: String,
+    pub(crate) path: Vec<String>,
 }
 
-pub(crate) struct PregelTaskWrites {
-    pub(crate) name: String,
-    pub(crate) path: TaskPath,
-    pub(crate) writes: Vec<TaskWrite>,
-    pub(crate) triggers: Vec<String>,
+pub(crate) struct PregelTaskManager<StateT, UpdateT, ContextT> {
+    tasks: HashMap<String, PregelExecutableTask<StateT, UpdateT, ContextT>>,
 }
 
-pub(crate) struct PregelTaskResult<UpdateT> {
-    pub(crate) task_id: TaskId,
-    pub(crate) name: String,
-    pub(crate) output: NodeOutput<UpdateT>,
-    pub(crate) writes: Vec<TaskWrite>,
-}
+impl<StateT, UpdateT, ContextT> PregelTaskManager<StateT, UpdateT, ContextT> {
+    pub(crate) fn new() -> Self {
+        todo!()
+    }
 
-pub(crate) struct PregelStep<StateT> {
-    pub(crate) step: usize,
-    pub(crate) tasks: Vec<PregelTask<StateT>>,
-}
+    pub(crate) fn submit_task(&mut self, _task: PregelExecutableTask<StateT, UpdateT, ContextT>) {
+        todo!()
+    }
 
-impl<StateT> PregelTask<StateT> {
-    pub(crate) fn new(
-        _id: TaskId,
+    pub(crate) fn prepare_tasks(&mut self) -> Vec<PregelExecutableTask<StateT, UpdateT, ContextT>> {
+        todo!()
+    }
+
+    pub(crate) fn prepare_task(
+        &mut self,
         _name: String,
-        _path: TaskPath,
         _input: StateT,
-        _triggers: Vec<String>,
-    ) -> Self {
+    ) -> PregelExecutableTask<StateT, UpdateT, ContextT> {
         todo!()
     }
 
-    pub(crate) fn writes(self, _writes: Vec<TaskWrite>) -> PregelTaskWrites {
-        todo!()
-    }
-}
-
-impl PregelTaskWrites {
-    pub(crate) fn new(
-        _name: String,
-        _path: TaskPath,
-        _writes: Vec<TaskWrite>,
-        _triggers: Vec<String>,
-    ) -> Self {
-        todo!()
-    }
-
-    pub(crate) fn input(_writes: Vec<TaskWrite>) -> Self {
-        todo!()
-    }
-
-    pub(crate) fn is_triggered(&self) -> bool {
-        todo!()
-    }
-}
-
-impl<UpdateT> PregelTaskResult<UpdateT> {
-    pub(crate) fn new(
-        _task_id: TaskId,
-        _name: String,
-        _output: NodeOutput<UpdateT>,
-        _writes: Vec<TaskWrite>,
-    ) -> Self {
-        todo!()
-    }
-
-    pub(crate) fn into_writes(self, _path: TaskPath, _triggers: Vec<String>) -> PregelTaskWrites {
-        todo!()
-    }
-}
-
-impl<StateT> PregelStep<StateT> {
-    pub(crate) fn new(_step: usize, _tasks: Vec<PregelTask<StateT>>) -> Self {
-        todo!()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        todo!()
-    }
-
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) fn execute_task(
+        &mut self,
+        _task: PregelExecutableTask<StateT, UpdateT, ContextT>,
+    ) -> Result<NodeOutput<UpdateT>, GraphError> {
         todo!()
     }
 }
