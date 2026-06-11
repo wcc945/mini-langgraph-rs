@@ -36,7 +36,9 @@
 - `CompiledStateGraph` 已作为编译后图的最小外壳，内部持有 `Pregel`；`compile()` 会先 `attach_node(START, None)` 创建订阅 `START` 的入口节点，`attach_node` 会为每个用户节点创建并订阅 `branch:to:{node}` trigger，`START -> node` 和普通 `node -> target` 都只给起点节点追加写入 `branch:to:{target}` 的 writer，`node -> END` 不生成 `END` 节点或 trigger。条件分支通过可执行 `ChannelWriter` 写入 `branch:to:{target}`，`END` 路由不会生成 trigger。编译后图当前已提供 `invoke`、默认 `stream` 和 `stream_with_mode` 运行入口。
 - 构图 API 和 `validate` 已统一返回 `GraphError`，避免使用散落的字符串错误；`GraphError` 当前包含重复节点、保留节点名、未知节点、非法边端点、重复分支、缺少入口和未知分支目标等构图错误。
 - 已为核心构图模块补充单元测试，覆盖 `BranchSpec::resolve`、`WaitingEdgeSpec` 起点归一化、`StateNodeSpec` runnable 保存和执行、`StateGraph` builder 成功路径、错误路径与 `validate` 校验。
+- 已新增 `tests/mvp_runtime.rs` crate-level 集成测试，从公开 API 视角覆盖 `StateGraph::with_channels`、`compile`、`invoke`、默认 `stream`、`stream_with_mode(Updates)`、条件边、waiting edge、多次运行隔离、空输入错误和 unsupported command。
 - `StateGraph` 已实现 `new()`，用于创建空 builder；暂不接收 Python 版 `state_schema/context_schema/input_schema/output_schema` 参数。
+- `StateGraph` 已实现 `with_channels([...])`，用于公开 API 场景下快速创建一组 `LastValue` state channels，避免外部调用方在 MVP 阶段直接依赖内部 channel trait。
 - `src/graph/node.rs` 已开始定义节点执行层骨架：`NodeFn<NodeInputT, UpdateT, ContextT>` 使用统一签名 `(&NodeInputT, &RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>`，其中 `RuntimeContext` 按运行依赖只读视图处理。
 - `NodeOutput<UpdateT>` 当前设计为支持普通 `Update(UpdateT)`、`Command(Command<UpdateT>)`、多个 `Commands(Vec<Command<UpdateT>>)` 和 `None`。
 - `StateNodeSpec<NodeInputT, UpdateT, ContextT>` 当前仅保存 `runnable`，暂不包含源项目中的 `metadata`、`input_schema`、`retry_policy`、`cache_policy`、`timeout` 等策略字段。

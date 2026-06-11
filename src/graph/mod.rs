@@ -7,5 +7,6 @@ mod state;
 mod waiting_edge;
 
 pub use compiled::CompiledStateGraph;
+pub use node::{Command, NodeFn, NodeOutput};
 pub use state::{IntoEdgeStarts, StateGraph};
 pub use waiting_edge::WaitingEdgeSpec;

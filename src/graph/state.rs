@@ -1,4 +1,5 @@
 use crate::channel::DynChannel;
+use crate::channel::last_value::LastValue;
 use crate::error::GraphError;
 use crate::graph::branch::{BranchPathFn, BranchSpec};
 use crate::graph::compiled::CompiledStateGraph;
@@ -67,6 +68,20 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
             managed: HashMap::new(),
             _marker: PhantomData,
         }
+    }
+
+    pub fn with_channels(channels: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let mut graph = Self::new();
+        graph.channels = channels
+            .into_iter()
+            .map(|channel| {
+                (
+                    channel.into(),
+                    Box::new(LastValue::new()) as Box<DynChannel>,
+                )
+            })
+            .collect();
+        graph
     }
 }
 
