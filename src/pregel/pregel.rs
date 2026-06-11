@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::channel::DynChannel;
+use crate::channel::{DynChannel, StateValue};
 use crate::error::GraphError;
 use crate::managed::ManagedValueSpec;
 use crate::pregel::consts::{DEFAULT_NAME, DEFAULT_RECURSION_LIMIT};
@@ -10,16 +10,16 @@ use crate::pregel::node::PregelNode;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StreamMode {
+pub enum StreamMode {
     Values,
     Updates,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct PregelStreamItem {
-    pub(crate) step: usize,
-    pub(crate) mode: StreamMode,
-    pub(crate) data: crate::channel::StateValue,
+pub struct PregelStreamItem {
+    pub step: usize,
+    pub mode: StreamMode,
+    pub data: StateValue,
 }
 
 pub(crate) struct Pregel<StateT, UpdateT, ContextT> {
@@ -176,19 +176,29 @@ where
 {
     pub(crate) fn stream(
         self: Arc<Self>,
-        input: Option<crate::channel::StateValue>,
+        input: Option<StateValue>,
+    ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError> {
+        let stream_mode = self.stream_mode;
+        self.stream_with_mode(input, stream_mode)
+    }
+
+    pub(crate) fn stream_with_mode(
+        self: Arc<Self>,
+        input: Option<StateValue>,
+        stream_mode: StreamMode,
     ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError> {
         let (sender, receiver) = mpsc::channel(16);
 
         tokio::spawn(async move {
             let new_error_sender = sender.clone();
-            let mut loop_state = match PregelLoop::new(&self, input, sender) {
-                Ok(loop_state) => loop_state,
-                Err(error) => {
-                    let _ = new_error_sender.send(Err(error)).await;
-                    return;
-                }
-            };
+            let mut loop_state =
+                match PregelLoop::new_with_stream_mode(&self, input, stream_mode, sender) {
+                    Ok(loop_state) => loop_state,
+                    Err(error) => {
+                        let _ = new_error_sender.send(Err(error)).await;
+                        return;
+                    }
+                };
 
             if let Err(error) = loop_state.enter() {
                 let _ = loop_state.stream_sender.send(Err(error)).await;
@@ -208,12 +218,12 @@ where
                     break;
                 }
 
-                if let Err(error) = loop_state.execute().await {
+                if let Err(error) = loop_state.execute() {
                     let _ = loop_state.stream_sender.send(Err(error)).await;
                     break;
                 }
 
-                if let Err(error) = loop_state.after_tick().await {
+                if let Err(error) = loop_state.after_tick() {
                     let _ = loop_state.stream_sender.send(Err(error)).await;
                     break;
                 }
@@ -225,6 +235,27 @@ where
         });
 
         Ok(receiver)
+    }
+
+    pub(crate) fn invoke(
+        self: Arc<Self>,
+        input: Option<StateValue>,
+    ) -> Result<StateValue, GraphError> {
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut loop_state = PregelLoop::new(&self, input, sender)?;
+
+        loop_state.enter()?;
+
+        loop {
+            if !loop_state.tick()? {
+                break;
+            }
+
+            loop_state.execute()?;
+            loop_state.after_tick()?;
+        }
+
+        loop_state.output()
     }
 }
 
@@ -314,7 +345,7 @@ mod tests {
             HashMap::from([
                 (
                     "a".to_string(),
-                    PregelNode::new(
+                    PregelNode::<StateValue, StateValue, ()>::new(
                         vec!["input".to_string()],
                         vec!["input".to_string()],
                         None,
@@ -326,7 +357,7 @@ mod tests {
                 ),
                 (
                     "b".to_string(),
-                    PregelNode::new(
+                    PregelNode::<StateValue, StateValue, ()>::new(
                         vec!["mid".to_string()],
                         vec!["to_b".to_string()],
                         None,
@@ -507,6 +538,157 @@ mod tests {
             )]))
         );
         assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_with_mode_overrides_default_stream_mode() {
+        let pregel = Arc::new(stream_pregel());
+        let mut receiver = pregel
+            .stream_with_mode(
+                Some(StateValue::String("start".to_string())),
+                StreamMode::Updates,
+            )
+            .unwrap();
+
+        let item = receiver.recv().await.unwrap().unwrap();
+
+        assert_eq!(item.step, 1);
+        assert_eq!(item.mode, StreamMode::Updates);
+        assert_eq!(
+            item.data,
+            StateValue::Object(HashMap::from([(
+                "b".to_string(),
+                StateValue::String("a".to_string())
+            )]))
+        );
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[test]
+    fn invoke_runs_to_completion_and_returns_final_output() {
+        let pregel = Arc::new(stream_pregel());
+
+        let output = pregel
+            .invoke(Some(StateValue::String("start".to_string())))
+            .unwrap();
+
+        assert_eq!(output, StateValue::String("a".to_string()));
+    }
+
+    #[test]
+    fn invoke_propagates_enter_error() {
+        let pregel = Arc::new(stream_pregel());
+
+        let error = pregel.invoke(None).unwrap_err();
+
+        assert!(
+            matches!(error, GraphError::EmptyPregelInput(channels) if channels == vec!["input"])
+        );
+    }
+
+    #[test]
+    fn invoke_propagates_execute_error() {
+        let pregel = Arc::new(
+            Pregel::new(
+                HashMap::from([(
+                    "a".to_string(),
+                    PregelNode::<StateValue, StateValue, ()>::new(
+                        vec!["input".to_string()],
+                        vec!["input".to_string()],
+                        None,
+                        Vec::new(),
+                        Box::new(|_, _| Err(GraphError::InvalidPregelInput("bad".to_string()))),
+                    ),
+                )]),
+                channels(&["input", "output"]),
+                HashMap::new(),
+                vec!["input".to_string()],
+                vec!["output".to_string()],
+            )
+            .unwrap(),
+        );
+
+        let error = pregel
+            .invoke(Some(StateValue::String("start".to_string())))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            GraphError::PregelTaskFailed { node, message }
+                if node == "a" && message == "invalid Pregel input: bad"
+        ));
+    }
+
+    #[test]
+    fn invoke_propagates_tick_error() {
+        let mut pregel = Pregel::new(
+            HashMap::from([(
+                "loop".to_string(),
+                PregelNode::<StateValue, StateValue, ()>::new(
+                    vec!["input".to_string()],
+                    vec!["input".to_string()],
+                    None,
+                    vec![trigger_writer("input")],
+                    Box::new(|_, _| Ok(NodeOutput::None)),
+                ),
+            )]),
+            channels(&["input", "output"]),
+            HashMap::new(),
+            vec!["input".to_string()],
+            vec!["output".to_string()],
+        )
+        .unwrap();
+        pregel.recursion_limit = 1;
+
+        let error = Arc::new(pregel)
+            .invoke(Some(StateValue::String("start".to_string())))
+            .unwrap_err();
+
+        assert!(matches!(error, GraphError::PregelRecursionLimitReached(1)));
+    }
+
+    #[test]
+    fn invoke_propagates_after_tick_error() {
+        let pregel = Arc::new(
+            Pregel::new(
+                HashMap::from([
+                    (
+                        "a".to_string(),
+                        PregelNode::<StateValue, StateValue, ()>::new(
+                            vec!["input".to_string()],
+                            vec!["input".to_string()],
+                            None,
+                            vec![passthrough_writer("output")],
+                            Box::new(|_, _| Ok(NodeOutput::Update(StateValue::Number(1.0)))),
+                        ),
+                    ),
+                    (
+                        "b".to_string(),
+                        PregelNode::<StateValue, StateValue, ()>::new(
+                            vec!["input".to_string()],
+                            vec!["input".to_string()],
+                            None,
+                            vec![passthrough_writer("output")],
+                            Box::new(|_, _| Ok(NodeOutput::Update(StateValue::Number(2.0)))),
+                        ),
+                    ),
+                ]),
+                channels(&["input", "output"]),
+                HashMap::new(),
+                vec!["input".to_string()],
+                vec!["output".to_string()],
+            )
+            .unwrap(),
+        );
+
+        let error = pregel
+            .invoke(Some(StateValue::String("start".to_string())))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            GraphError::MultipleUpdatesWithoutReducer { count: 2 }
+        ));
     }
 
     #[tokio::test]

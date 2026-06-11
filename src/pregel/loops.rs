@@ -54,6 +54,15 @@ where
         input: Option<StateValue>,
         stream_sender: mpsc::Sender<Result<PregelStreamItem, GraphError>>,
     ) -> Result<Self, GraphError> {
+        Self::new_with_stream_mode(pregel, input, pregel.stream_mode, stream_sender)
+    }
+
+    pub(crate) fn new_with_stream_mode(
+        pregel: &'a Pregel<StateT, UpdateT, ContextT>,
+        input: Option<StateValue>,
+        stream_mode: StreamMode,
+        stream_sender: mpsc::Sender<Result<PregelStreamItem, GraphError>>,
+    ) -> Result<Self, GraphError> {
         let channels = pregel.copy_channels()?;
         let managed = pregel.copy_managed();
         let recursion_limit = pregel.recursion_limit;
@@ -66,7 +75,7 @@ where
             input_channels: &pregel.input_channels,
             output_channels: &pregel.output_channels,
             stream_channels: pregel.stream_channels.as_deref(),
-            stream_mode: pregel.stream_mode,
+            stream_mode,
             recursion_limit,
             trigger_to_nodes: &pregel.trigger_to_nodes,
             name: &pregel.name,
@@ -259,6 +268,33 @@ where
         }
     }
 
+    pub(crate) fn output(&mut self) -> Result<StateValue, GraphError> {
+        let output = if self.output_channels.len() == 1 {
+            let channel_name = &self.output_channels[0];
+            let Some(channel) = self.channels.get(channel_name) else {
+                return Err(GraphError::UnknownPregelOutputChannel(channel_name.clone()));
+            };
+
+            channel.get()?
+        } else {
+            let mut values = HashMap::new();
+            for channel_name in self.output_channels {
+                let Some(channel) = self.channels.get(channel_name) else {
+                    continue;
+                };
+
+                if channel.is_available() {
+                    values.insert(channel_name.clone(), channel.get()?);
+                }
+            }
+
+            StateValue::Object(values)
+        };
+
+        self.output = Some(output.clone());
+        Ok(output)
+    }
+
     fn map_output_updates(&self, tasks: &[PregelTaskWrites]) -> Option<StateValue> {
         let stream_channels = self
             .stream_channels
@@ -362,7 +398,7 @@ where
         Ok(true)
     }
 
-    pub(crate) async fn execute(&mut self) -> Result<(), GraphError>
+    pub(crate) fn execute(&mut self) -> Result<(), GraphError>
     where
         StateT: Send,
         UpdateT: Send,
@@ -380,14 +416,13 @@ where
                 mode: StreamMode::Updates,
                 data,
             };
-            let sender = self.stream_sender.clone();
-            let _ = sender.send(Ok(item)).await;
+            let _ = self.stream_sender.try_send(Ok(item));
         }
 
         Ok(())
     }
 
-    pub(crate) async fn after_tick(&mut self) -> Result<(), GraphError> {
+    pub(crate) fn after_tick(&mut self) -> Result<(), GraphError> {
         let pending_writes = std::mem::take(&mut self.pending_writes);
         let updated_channels = self.apply_writes(&pending_writes)?;
         let stream_channels = self
@@ -409,8 +444,7 @@ where
                 mode: StreamMode::Values,
                 data,
             };
-            let sender = self.stream_sender.clone();
-            let _ = sender.send(Ok(item)).await;
+            let _ = self.stream_sender.try_send(Ok(item));
         }
 
         self.updated_channels = Some(updated_channels);
@@ -913,6 +947,55 @@ mod tests {
     }
 
     #[test]
+    fn output_reads_single_output_channel() {
+        let pregel = valid_pregel();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        loop_state
+            .apply_writes(&[task(
+                "a",
+                vec!["pull", "a"],
+                vec![],
+                vec![("output", StateValue::String("done".to_string()))],
+            )])
+            .unwrap();
+
+        let output = loop_state.output().unwrap();
+
+        assert_eq!(output, StateValue::String("done".to_string()));
+        assert_eq!(loop_state.output, Some(output));
+    }
+
+    #[test]
+    fn output_reads_multiple_output_channels_and_skips_unavailable_channels() {
+        let mut pregel = valid_pregel();
+        pregel.output_channels = vec!["left".to_string(), "right".to_string()];
+        pregel.channels.insert("left".to_string(), channel());
+        pregel.channels.insert("right".to_string(), channel());
+        pregel.validate().unwrap();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        loop_state
+            .apply_writes(&[task(
+                "a",
+                vec!["pull", "a"],
+                vec![],
+                vec![("right", StateValue::Number(2.0))],
+            )])
+            .unwrap();
+
+        let output = loop_state.output().unwrap();
+
+        assert_eq!(
+            output,
+            StateValue::Object(HashMap::from([(
+                "right".to_string(),
+                StateValue::Number(2.0)
+            )]))
+        );
+    }
+
+    #[test]
     fn apply_writes_consumes_read_trigger_channels() {
         let mut pregel = valid_pregel();
         let mut barrier = NamedBarrierValue::new(["a"]);
@@ -1084,8 +1167,8 @@ mod tests {
         loop_state.enter().unwrap();
 
         assert!(loop_state.tick().unwrap());
-        loop_state.execute().await.unwrap();
-        loop_state.after_tick().await.unwrap();
+        loop_state.execute().unwrap();
+        loop_state.after_tick().unwrap();
 
         assert_eq!(loop_state.step, 1);
         assert!(loop_state.pending_writes.is_empty());
@@ -1163,7 +1246,7 @@ mod tests {
             assert_eq!(tasks.len(), 1);
         }
 
-        loop_state.execute().await.unwrap();
+        loop_state.execute().unwrap();
 
         assert_eq!(loop_state.pending_writes.len(), 1);
         assert_eq!(loop_state.pending_writes[0].name, "a");
@@ -1213,7 +1296,7 @@ mod tests {
         loop_state.enter().unwrap();
         assert!(loop_state.tick().unwrap());
 
-        loop_state.execute().await.unwrap();
+        loop_state.execute().unwrap();
 
         let item = receiver.recv().await.unwrap().unwrap();
         assert_eq!(item.step, 0);
@@ -1261,7 +1344,7 @@ mod tests {
         loop_state.enter().unwrap();
         assert!(loop_state.tick().unwrap());
 
-        loop_state.execute().await.unwrap();
+        loop_state.execute().unwrap();
 
         assert!(receiver.try_recv().is_err());
     }
@@ -1300,9 +1383,9 @@ mod tests {
         .unwrap();
         loop_state.enter().unwrap();
         assert!(loop_state.tick().unwrap());
-        loop_state.execute().await.unwrap();
+        loop_state.execute().unwrap();
 
-        loop_state.after_tick().await.unwrap();
+        loop_state.after_tick().unwrap();
 
         let item = receiver.recv().await.unwrap().unwrap();
         assert_eq!(item.step, 0);
@@ -1342,9 +1425,9 @@ mod tests {
         .unwrap();
         loop_state.enter().unwrap();
         assert!(loop_state.tick().unwrap());
-        loop_state.execute().await.unwrap();
+        loop_state.execute().unwrap();
 
-        loop_state.after_tick().await.unwrap();
+        loop_state.after_tick().unwrap();
 
         assert!(receiver.try_recv().is_err());
     }

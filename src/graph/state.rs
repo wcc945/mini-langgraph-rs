@@ -355,6 +355,7 @@ mod tests {
     use crate::channel::last_value::LastValue;
     use crate::graph::node::NodeOutput;
     use crate::managed::ManagedValueSpec;
+    use crate::pregel::pregel::StreamMode;
     use crate::runtime::RuntimeContext;
 
     struct TestManagedValue;
@@ -613,6 +614,139 @@ mod tests {
             compiled.pregel.stream_channels,
             Some(compiled.pregel.output_channels.clone())
         );
+    }
+
+    #[test]
+    fn compiled_graph_invoke_returns_final_state_channel() {
+        let mut graph: StateGraph<StateValue, StateValue> = StateGraph::new();
+        graph
+            .channels
+            .insert("value".to_string(), Box::new(LastValue::new()));
+        graph
+            .add_node(
+                "write",
+                Box::new(|_, _| {
+                    Ok(NodeOutput::Update(StateValue::Object(HashMap::from([(
+                        "value".to_string(),
+                        StateValue::String("done".to_string()),
+                    )]))))
+                }),
+            )
+            .unwrap();
+        graph.set_entry_point("write").unwrap();
+        graph.set_finish_point("write").unwrap();
+        let compiled = graph.compile().unwrap();
+
+        let output = compiled.invoke(Some(StateValue::Null)).unwrap();
+
+        assert_eq!(output, StateValue::String("done".to_string()));
+    }
+
+    #[tokio::test]
+    async fn compiled_graph_stream_with_updates_returns_node_update() {
+        let mut graph: StateGraph<StateValue, StateValue> = StateGraph::new();
+        graph
+            .channels
+            .insert("value".to_string(), Box::new(LastValue::new()));
+        graph
+            .add_node(
+                "write",
+                Box::new(|_, _| {
+                    Ok(NodeOutput::Update(StateValue::Object(HashMap::from([(
+                        "value".to_string(),
+                        StateValue::Number(1.0),
+                    )]))))
+                }),
+            )
+            .unwrap();
+        graph.set_entry_point("write").unwrap();
+        graph.set_finish_point("write").unwrap();
+        let compiled = graph.compile().unwrap();
+
+        let mut receiver = compiled
+            .stream_with_mode(Some(StateValue::Null), StreamMode::Updates)
+            .unwrap();
+        let item = receiver.recv().await.unwrap().unwrap();
+
+        assert_eq!(item.mode, StreamMode::Updates);
+        assert_eq!(
+            item.data,
+            StateValue::Object(HashMap::from([(
+                "write".to_string(),
+                StateValue::Number(1.0)
+            )]))
+        );
+    }
+
+    #[test]
+    fn compiled_graph_executes_conditional_edge() {
+        let mut graph: StateGraph<StateValue, StateValue> = StateGraph::new();
+        graph
+            .channels
+            .insert("value".to_string(), Box::new(LastValue::new()));
+        graph
+            .add_node("route", Box::new(|_, _| Ok(NodeOutput::None)))
+            .unwrap();
+        graph
+            .add_node(
+                "next",
+                Box::new(|_, _| {
+                    Ok(NodeOutput::Update(StateValue::Object(HashMap::from([(
+                        "value".to_string(),
+                        StateValue::String("routed".to_string()),
+                    )]))))
+                }),
+            )
+            .unwrap();
+        graph.set_entry_point("route").unwrap();
+        graph
+            .add_conditional_edges(
+                "route",
+                "choose",
+                Box::new(|_, _| Some("next".to_string())),
+                HashMap::from([("next".to_string(), "next".to_string())]),
+            )
+            .unwrap();
+        graph.set_finish_point("next").unwrap();
+        let compiled = graph.compile().unwrap();
+
+        let output = compiled.invoke(Some(StateValue::Null)).unwrap();
+
+        assert_eq!(output, StateValue::String("routed".to_string()));
+    }
+
+    #[test]
+    fn compiled_graph_executes_waiting_edge_after_all_starts() {
+        let mut graph: StateGraph<StateValue, StateValue> = StateGraph::new();
+        graph
+            .channels
+            .insert("value".to_string(), Box::new(LastValue::new()));
+        graph
+            .add_node("a", Box::new(|_, _| Ok(NodeOutput::None)))
+            .unwrap();
+        graph
+            .add_node("b", Box::new(|_, _| Ok(NodeOutput::None)))
+            .unwrap();
+        graph
+            .add_node(
+                "join",
+                Box::new(|_, _| {
+                    Ok(NodeOutput::Update(StateValue::Object(HashMap::from([(
+                        "value".to_string(),
+                        StateValue::String("joined".to_string()),
+                    )]))))
+                }),
+            )
+            .unwrap();
+        graph.add_edge(START, "a").unwrap();
+        graph.add_edge(START, "b").unwrap();
+        graph.add_edge(["a", "b"], "join").unwrap();
+        graph.set_finish_point("join").unwrap();
+        let compiled = graph.compile().unwrap();
+
+        let output = compiled.invoke(Some(StateValue::Null)).unwrap();
+
+        assert_eq!(output, StateValue::String("joined".to_string()));
     }
 
     #[test]

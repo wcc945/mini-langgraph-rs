@@ -158,7 +158,7 @@ where
         Ok(self)
     }
 
-    pub(crate) fn stream(
+    pub fn stream(
         &self,
         input: Option<StateValue>,
     ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError>
@@ -168,6 +168,28 @@ where
         ContextT: Default + Send + Sync + 'static,
     {
         Arc::clone(&self.pregel).stream(input)
+    }
+
+    pub fn stream_with_mode(
+        &self,
+        input: Option<StateValue>,
+        stream_mode: StreamMode,
+    ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError>
+    where
+        StateT: From<StateValue> + Send + 'static,
+        UpdateT: Into<StateValue> + Send + 'static,
+        ContextT: Default + Send + Sync + 'static,
+    {
+        Arc::clone(&self.pregel).stream_with_mode(input, stream_mode)
+    }
+
+    pub fn invoke(&self, input: Option<StateValue>) -> Result<StateValue, GraphError>
+    where
+        StateT: From<StateValue> + Send + 'static,
+        UpdateT: Into<StateValue> + Send + 'static,
+        ContextT: Default + Send + Sync + 'static,
+    {
+        Arc::clone(&self.pregel).invoke(input)
     }
 
     fn branch_trigger_channel(target: &str) -> String {

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::error::GraphError;
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum StateValue {
+pub enum StateValue {
     Null,
     Bool(bool),
     Number(f64),

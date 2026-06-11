@@ -5,5 +5,7 @@ mod managed;
 mod pregel;
 mod runtime;
 
+pub use crate::channel::StateValue;
 pub use crate::error::GraphError;
 pub use crate::graph::consts::{END, START};
+pub use crate::pregel::pregel::{PregelStreamItem, StreamMode};

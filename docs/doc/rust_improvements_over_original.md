@@ -280,7 +280,7 @@ struct Pregel<StateT, UpdateT, ContextT> {
 }
 ```
 
-源项目的 `channels: dict[str, BaseChannel | ManagedValueSpec]` 在 Rust 版拆成 `channels` 和 `managed` 两张表，以保留动态 channel map 的同时避免把 managed value 当作普通 channel 更新。当前 `Pregel::validate` 只迁移 `validate_graph` 的最小结构校验，并重建 `trigger_to_nodes`；`stream` 已接入最小 Tokio mpsc 管道和 loop 构造边界，`invoke`、checkpoint、interrupt/resume 等能力仍暂缓。
+源项目的 `channels: dict[str, BaseChannel | ManagedValueSpec]` 在 Rust 版拆成 `channels` 和 `managed` 两张表，以保留动态 channel map 的同时避免把 managed value 当作普通 channel 更新。当前 `Pregel::validate` 只迁移 `validate_graph` 的最小结构校验，并重建 `trigger_to_nodes`；`invoke` 已接入同步 loop 主线，`stream` 已接入最小 Tokio mpsc 管道和 loop 构造边界，checkpoint、interrupt/resume 等能力仍暂缓。
 
 ## 15. CompiledStateGraph 先固定编译装配边界
 
@@ -296,13 +296,13 @@ pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
 
 源项目 `StateGraph.compile()` 会分别计算 `output_channels` 与 `stream_channels` 并传入 `CompiledStateGraph`。Rust 版当前还没有独立 input/output schema projection，因此先让 `stream_channels` 默认等于 `output_channels`，后续引入 schema 后再拆分两者。
 
-当前不复制源项目的完整 checkpoint 或 stream 路径；`PregelNode.bound` 直接复用 builder 中的节点函数，`mapper` 暂不接入真实状态投影协议。源项目通过 `ChannelWrite.register_writer(branch.run(...))` 把分支 runnable 标记为 writer；Rust 版用泛型可执行 `ChannelWriter` 表达同一编译边界，让 writer 能访问 `&StateT` 和 `RuntimeContext` 后返回 `ChannelWriteEntry`。该实现暂不迁移 schema reader、`Send`、async 或 Runnable 生态。waiting edge 已按源项目 `attach_edge(starts, end)` 路径编译为 `NamedBarrierValue` join channel，目标节点订阅 join channel，各起点节点写入自己的节点名。
+当前不复制源项目的完整 checkpoint 或 stream 路径；`PregelNode.bound` 直接复用 builder 中的节点函数，`mapper` 暂不接入真实状态投影协议。源项目通过 `ChannelWrite.register_writer(branch.run(...))` 把分支 runnable 标记为 writer；Rust 版用泛型可执行 `ChannelWriter` 表达同一编译边界，让 writer 能访问 `&StateT` 和 `RuntimeContext` 后返回 `ChannelWriteEntry`。该实现暂不迁移 schema reader、`Send`、async 或 Runnable 生态。waiting edge 已按源项目 `attach_edge(starts, end)` 路径编译为 `NamedBarrierValue` join channel，目标节点订阅 join channel，各起点节点写入自己的节点名。`CompiledStateGraph` 当前公开 `invoke`、`stream` 和 `stream_with_mode`，但一次 stream 调用仍只接受一个 `StreamMode`，不复制源项目多 stream mode 的复合输出协议。
 
 ## 16. PregelLoop 持有每次运行的独立状态
 
 源项目 `PregelLoop` / `SyncPregelLoop` 同时承载运行时核心状态和 checkpoint、cache、store、interrupt、debug stream、retry、async executor、生命周期事件等平台能力。Rust 版当前只实现同步 Pregel 主线需要的运行态，并把图规格与运行状态分开：`Pregel` 保存 nodes、channel 原型和配置，`PregelLoop` 持有本次运行复制出的 channels、step、pending writes、updated channels 和输出缓存。
 
-当前 `PregelLoop::new` 从 `Pregel.channels` 和 `Pregel.managed` 复制本次运行专用 map，不再借用或共享这两类运行态。`PregelLoop::enter` 对齐源项目 `SyncPregelLoop.__enter__` 的调用边界，并调用 Rust 版 `first` 执行 fresh input 初始化；`first` 只迁移源项目 `_first` 中“输入映射为 channel 写入并产生 `updated_channels`”的主线。`tick` 已接入源项目 Plan 阶段的最小主线：检查递归限制，根据上一轮 `updated_channels` 准备 PULL tasks，无任务时标记 `Done`。`execute` 已接入当前 superstep 已准备任务的执行和 pending writes 收集，并保持源项目“执行阶段只产出 writes，Update 阶段再应用 channel”的边界。`after_tick` 已接入最小 Update 阶段：应用 pending writes、刷新 `updated_channels`、清空 pending writes 并推进 `step`。`is_stream_closed` 目前仍只保留接口形状，不实现真实发送或关闭语义。
+当前 `PregelLoop::new` 从 `Pregel.channels` 和 `Pregel.managed` 复制本次运行专用 map，不再借用或共享这两类运行态。`PregelLoop::enter` 对齐源项目 `SyncPregelLoop.__enter__` 的调用边界，并调用 Rust 版 `first` 执行 fresh input 初始化；`first` 只迁移源项目 `_first` 中“输入映射为 channel 写入并产生 `updated_channels`”的主线。`tick` 已接入源项目 Plan 阶段的最小主线：检查递归限制，根据上一轮 `updated_channels` 准备 PULL tasks，无任务时标记 `Done`。`execute` 已接入当前 superstep 已准备任务的执行和 pending writes 收集，并保持源项目“执行阶段只产出 writes，Update 阶段再应用 channel”的边界。`after_tick` 已接入最小 Update 阶段：应用 pending writes、刷新 `updated_channels`、清空 pending writes 并推进 `step`。`output` 读取最终 output channels：单 channel 返回该值，多 channel 返回对象并跳过不可用字段。`is_stream_closed` 目前只反映 Tokio receiver 是否关闭。
 
 源项目 `_first` 还处理 checkpoint、resume、Command、time travel、delta channel、interrupt 等路径。Rust 版当前没有这些运行时能力，因此 `first` 不写入 pending writes，也不把 `None` 输入解释为 resume；`None` 或无法映射到 input channel 的输入会返回明确错误。
 
@@ -346,7 +346,7 @@ Rust 版当前没有 checkpoint、channel version、pending writes 持久化和 
 
 源项目 `PregelLoop.tick()` 负责检查步数、调用 `prepare_next_tasks`、处理中断/调试/缓存写入恢复，并把是否继续执行返回给外层 runner；`after_tick()` 则在任务执行完成后调用 `apply_writes`、输出 stream values、清理 checkpoint pending writes、保存 checkpoint 并推进运行状态。
 
-Rust 版当前只迁移无 checkpoint 的同步主线：`tick()` 清理上一轮 task 集合，根据 `updated_channels` 准备本轮 PULL tasks，空任务时进入 `Done`，超过递归限制时进入 `OutOfSteps` 并返回 `PregelRecursionLimitReached`。`execute()` 运行已准备任务并收集 `PregelTaskWrites`，在 `StreamMode::Updates` 下把命中 stream/output channels 的 task writes 映射为 `StateValue::Object({ node: update })` 后发送给调用方。`after_tick()` 使用 `apply_writes` 应用本轮 pending writes，把返回的 channel 集合作为下一轮 `updated_channels`，并在 `StreamMode::Values` 下读取 stream/output channels 的可用快照发送给调用方，然后递增 `step`。
+Rust 版当前只迁移无 checkpoint 的同步主线：`tick()` 清理上一轮 task 集合，根据 `updated_channels` 准备本轮 PULL tasks，空任务时进入 `Done`，超过递归限制时进入 `OutOfSteps` 并返回 `PregelRecursionLimitReached`。`execute()` 是同步执行入口，`invoke` 与 `stream` 都复用它；它运行已准备任务并收集 `PregelTaskWrites`，在 `StreamMode::Updates` 下把命中 stream/output channels 的 task writes 映射为 `StateValue::Object({ node: update })` 后通过 `try_send` 非阻塞发送给调用方。`after_tick()` 也是同步入口，使用 `apply_writes` 应用本轮 pending writes，把返回的 channel 集合作为下一轮 `updated_channels`，并在 `StreamMode::Values` 下读取 stream/output channels 的可用快照后通过 `try_send` 非阻塞发送给调用方，然后递增 `step`。
 
 由于没有 checkpoint 版本表，Rust 版不会复制源项目基于 `versions_seen` 的精确重复执行判断；当前仍以 channel `is_available()` 和上一轮 `updated_channels` 的 trigger 索引作为最小调度条件。stream 输出也只保留源项目 `map_output_updates` / `map_output_values` 的核心形状：`updates` 不暴露控制流 trigger channel，`values` 不读取不可用 channel，多输出或多节点更新通过 `StateValue::Object` / `StateValue::List` 表达。多 stream mode 列表、checkpoint pending writes、interrupt、debug/tasks/messages/custom stream、retry、cache、timeout、PUSH/Send task 和 error handler 仍暂缓。
 ## 当前仍需谨慎的地方
