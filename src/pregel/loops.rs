@@ -40,7 +40,6 @@ pub(crate) struct PregelLoop<'a, StateT, UpdateT, ContextT> {
     pub(crate) output: Option<StateValue>,
     pub(crate) stream_sender: mpsc::Sender<Result<PregelStreamItem, GraphError>>,
     pending_writes: Vec<PregelTaskWrites>,
-    task_updates: HashMap<String, StateValue>,
     runtime_context: RuntimeContext<ContextT>,
 }
 
@@ -80,7 +79,6 @@ where
             output: None,
             stream_sender,
             pending_writes: Vec::new(),
-            task_updates: HashMap::new(),
             runtime_context: RuntimeContext {
                 context: ContextT::default(),
             },
@@ -227,6 +225,114 @@ where
 
         Ok(updated_channels)
     }
+
+    fn read_stream_channels(&self) -> Result<Option<StateValue>, GraphError> {
+        let stream_channels = self.stream_channels.unwrap_or(self.output_channels);
+
+        if stream_channels.len() == 1 {
+            let Some(channel) = self.channels.get(&stream_channels[0]) else {
+                return Ok(None);
+            };
+
+            if !channel.is_available() {
+                return Ok(None);
+            }
+
+            return channel.get().map(Some);
+        }
+
+        let mut values = HashMap::new();
+        for channel_name in stream_channels {
+            let Some(channel) = self.channels.get(channel_name) else {
+                continue;
+            };
+
+            if channel.is_available() {
+                values.insert(channel_name.clone(), channel.get()?);
+            }
+        }
+
+        if values.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(StateValue::Object(values)))
+        }
+    }
+
+    fn map_output_updates(&self, tasks: &[PregelTaskWrites]) -> Option<StateValue> {
+        let stream_channels = self
+            .stream_channels
+            .unwrap_or(self.output_channels)
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let stream_channel_count = stream_channels.len();
+        let mut grouped = BTreeMap::<String, Vec<StateValue>>::new();
+
+        for task in tasks {
+            let writes = task
+                .writes
+                .iter()
+                .filter(|(channel, _)| stream_channels.contains(channel.as_str()))
+                .collect::<Vec<_>>();
+
+            if writes.is_empty() {
+                continue;
+            }
+
+            let updates = if stream_channel_count == 1 {
+                writes
+                    .into_iter()
+                    .map(|(_, value)| value.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                let mut counts = HashMap::<&str, usize>::new();
+                for (channel, _) in &writes {
+                    *counts.entry(channel.as_str()).or_default() += 1;
+                }
+
+                if counts.values().any(|count| *count > 1) {
+                    writes
+                        .into_iter()
+                        .map(|(channel, value)| {
+                            StateValue::Object(HashMap::from([(channel.clone(), value.clone())]))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![StateValue::Object(
+                        writes
+                            .into_iter()
+                            .map(|(channel, value)| (channel.clone(), value.clone()))
+                            .collect(),
+                    )]
+                }
+            };
+
+            grouped
+                .entry(task.name.clone())
+                .or_default()
+                .extend(updates);
+        }
+
+        if grouped.is_empty() {
+            return None;
+        }
+
+        Some(StateValue::Object(
+            grouped
+                .into_iter()
+                .map(|(node, values)| {
+                    let value = if values.len() == 1 {
+                        values.into_iter().next().unwrap_or(StateValue::Null)
+                    } else {
+                        StateValue::List(values)
+                    };
+                    (node, value)
+                })
+                .collect(),
+        ))
+    }
+
     pub(crate) fn tick(&mut self) -> Result<bool, GraphError> {
         if self.step > self.stop {
             self.status = PregelLoopStatus::OutOfSteps;
@@ -256,7 +362,7 @@ where
         Ok(true)
     }
 
-    pub(crate) fn execute(&mut self) -> Result<(), GraphError>
+    pub(crate) async fn execute(&mut self) -> Result<(), GraphError>
     where
         StateT: Send,
         UpdateT: Send,
@@ -266,12 +372,46 @@ where
             .task_manager
             .execute_pending_tasks(&self.runtime_context)?;
 
+        if self.stream_mode == StreamMode::Updates
+            && let Some(data) = self.map_output_updates(&self.pending_writes)
+        {
+            let item = PregelStreamItem {
+                step: self.step,
+                mode: StreamMode::Updates,
+                data,
+            };
+            let sender = self.stream_sender.clone();
+            let _ = sender.send(Ok(item)).await;
+        }
+
         Ok(())
     }
 
     pub(crate) async fn after_tick(&mut self) -> Result<(), GraphError> {
         let pending_writes = std::mem::take(&mut self.pending_writes);
         let updated_channels = self.apply_writes(&pending_writes)?;
+        let stream_channels = self
+            .stream_channels
+            .unwrap_or(self.output_channels)
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let stream_channels_updated = updated_channels
+            .iter()
+            .any(|channel| stream_channels.contains(channel.as_str()));
+
+        if self.stream_mode == StreamMode::Values
+            && stream_channels_updated
+            && let Some(data) = self.read_stream_channels()?
+        {
+            let item = PregelStreamItem {
+                step: self.step,
+                mode: StreamMode::Values,
+                data,
+            };
+            let sender = self.stream_sender.clone();
+            let _ = sender.send(Ok(item)).await;
+        }
 
         self.updated_channels = Some(updated_channels);
         self.step += 1;
@@ -280,7 +420,7 @@ where
     }
 
     pub(crate) fn is_stream_closed(&self) -> bool {
-        false
+        self.stream_sender.is_closed()
     }
 }
 
@@ -944,7 +1084,7 @@ mod tests {
         loop_state.enter().unwrap();
 
         assert!(loop_state.tick().unwrap());
-        loop_state.execute().unwrap();
+        loop_state.execute().await.unwrap();
         loop_state.after_tick().await.unwrap();
 
         assert_eq!(loop_state.step, 1);
@@ -975,8 +1115,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn execute_runs_prepared_tasks_and_keeps_writes_pending() {
+    #[tokio::test]
+    async fn execute_runs_prepared_tasks_and_keeps_writes_pending() {
         let pregel = Pregel::new(
             HashMap::from([(
                 "a".to_string(),
@@ -1023,7 +1163,7 @@ mod tests {
             assert_eq!(tasks.len(), 1);
         }
 
-        loop_state.execute().unwrap();
+        loop_state.execute().await.unwrap();
 
         assert_eq!(loop_state.pending_writes.len(), 1);
         assert_eq!(loop_state.pending_writes[0].name, "a");
@@ -1035,5 +1175,188 @@ mod tests {
             loop_state.channels.get("output").unwrap().get(),
             Err(GraphError::EmptyChannel)
         ));
+    }
+
+    #[tokio::test]
+    async fn execute_sends_updates_for_output_writes() {
+        let mut pregel = Pregel::new(
+            HashMap::from([(
+                "a".to_string(),
+                PregelNode::new(
+                    vec!["input".to_string()],
+                    vec!["input".to_string()],
+                    None,
+                    vec![fixed_writer(
+                        "output",
+                        StateValue::String("done".to_string()),
+                    )],
+                    Box::new(|_, _| Ok(NodeOutput::<StateValue>::None)),
+                ),
+            )]),
+            HashMap::from([
+                ("input".to_string(), channel()),
+                ("output".to_string(), channel()),
+            ]),
+            HashMap::new(),
+            vec!["input".to_string()],
+            vec!["output".to_string()],
+        )
+        .unwrap();
+        pregel.stream_mode = StreamMode::Updates;
+        let (sender, mut receiver) = mpsc::channel(4);
+        let mut loop_state = PregelLoop::new(
+            &pregel,
+            Some(StateValue::String("start".to_string())),
+            sender,
+        )
+        .unwrap();
+        loop_state.enter().unwrap();
+        assert!(loop_state.tick().unwrap());
+
+        loop_state.execute().await.unwrap();
+
+        let item = receiver.recv().await.unwrap().unwrap();
+        assert_eq!(item.step, 0);
+        assert_eq!(item.mode, StreamMode::Updates);
+        assert_eq!(
+            item.data,
+            StateValue::Object(HashMap::from([(
+                "a".to_string(),
+                StateValue::String("done".to_string())
+            )]))
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_skips_updates_without_output_writes() {
+        let mut pregel = Pregel::new(
+            HashMap::from([(
+                "a".to_string(),
+                PregelNode::new(
+                    vec!["input".to_string()],
+                    vec!["input".to_string()],
+                    None,
+                    vec![fixed_writer("side", StateValue::String("side".to_string()))],
+                    Box::new(|_, _| Ok(NodeOutput::<StateValue>::None)),
+                ),
+            )]),
+            HashMap::from([
+                ("input".to_string(), channel()),
+                ("output".to_string(), channel()),
+                ("side".to_string(), channel()),
+            ]),
+            HashMap::new(),
+            vec!["input".to_string()],
+            vec!["output".to_string()],
+        )
+        .unwrap();
+        pregel.stream_mode = StreamMode::Updates;
+        let (sender, mut receiver) = mpsc::channel(4);
+        let mut loop_state = PregelLoop::new(
+            &pregel,
+            Some(StateValue::String("start".to_string())),
+            sender,
+        )
+        .unwrap();
+        loop_state.enter().unwrap();
+        assert!(loop_state.tick().unwrap());
+
+        loop_state.execute().await.unwrap();
+
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn after_tick_sends_values_after_applying_writes() {
+        let pregel = Pregel::new(
+            HashMap::from([(
+                "a".to_string(),
+                PregelNode::new(
+                    vec!["input".to_string()],
+                    vec!["input".to_string()],
+                    None,
+                    vec![fixed_writer(
+                        "output",
+                        StateValue::String("done".to_string()),
+                    )],
+                    Box::new(|_, _| Ok(NodeOutput::<StateValue>::None)),
+                ),
+            )]),
+            HashMap::from([
+                ("input".to_string(), channel()),
+                ("output".to_string(), channel()),
+            ]),
+            HashMap::new(),
+            vec!["input".to_string()],
+            vec!["output".to_string()],
+        )
+        .unwrap();
+        let (sender, mut receiver) = mpsc::channel(4);
+        let mut loop_state = PregelLoop::new(
+            &pregel,
+            Some(StateValue::String("start".to_string())),
+            sender,
+        )
+        .unwrap();
+        loop_state.enter().unwrap();
+        assert!(loop_state.tick().unwrap());
+        loop_state.execute().await.unwrap();
+
+        loop_state.after_tick().await.unwrap();
+
+        let item = receiver.recv().await.unwrap().unwrap();
+        assert_eq!(item.step, 0);
+        assert_eq!(item.mode, StreamMode::Values);
+        assert_eq!(item.data, StateValue::String("done".to_string()));
+    }
+
+    #[tokio::test]
+    async fn after_tick_skips_values_when_stream_channels_unchanged() {
+        let pregel = Pregel::new(
+            HashMap::from([(
+                "a".to_string(),
+                PregelNode::new(
+                    vec!["input".to_string()],
+                    vec!["input".to_string()],
+                    None,
+                    vec![fixed_writer("side", StateValue::String("side".to_string()))],
+                    Box::new(|_, _| Ok(NodeOutput::<StateValue>::None)),
+                ),
+            )]),
+            HashMap::from([
+                ("input".to_string(), channel()),
+                ("output".to_string(), channel()),
+                ("side".to_string(), channel()),
+            ]),
+            HashMap::new(),
+            vec!["input".to_string()],
+            vec!["output".to_string()],
+        )
+        .unwrap();
+        let (sender, mut receiver) = mpsc::channel(4);
+        let mut loop_state = PregelLoop::new(
+            &pregel,
+            Some(StateValue::String("start".to_string())),
+            sender,
+        )
+        .unwrap();
+        loop_state.enter().unwrap();
+        assert!(loop_state.tick().unwrap());
+        loop_state.execute().await.unwrap();
+
+        loop_state.after_tick().await.unwrap();
+
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn is_stream_closed_reflects_receiver_drop() {
+        let pregel = valid_pregel();
+        let (sender, receiver) = mpsc::channel(1);
+        let loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+
+        drop(receiver);
+
+        assert!(loop_state.is_stream_closed());
     }
 }

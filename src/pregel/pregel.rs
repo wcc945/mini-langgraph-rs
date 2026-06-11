@@ -208,7 +208,7 @@ where
                     break;
                 }
 
-                if let Err(error) = loop_state.execute() {
+                if let Err(error) = loop_state.execute().await {
                     let _ = loop_state.stream_sender.send(Err(error)).await;
                     break;
                 }
@@ -473,12 +473,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_executes_loop_and_closes_without_output_items() {
+    async fn stream_sends_values_items() {
         let pregel = Arc::new(stream_pregel());
         let mut receiver = pregel
             .stream(Some(StateValue::String("start".to_string())))
             .unwrap();
 
+        let item = receiver.recv().await.unwrap().unwrap();
+
+        assert_eq!(item.step, 1);
+        assert_eq!(item.mode, StreamMode::Values);
+        assert_eq!(item.data, StateValue::String("a".to_string()));
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_sends_updates_items() {
+        let mut pregel = stream_pregel();
+        pregel.stream_mode = StreamMode::Updates;
+        let mut receiver = Arc::new(pregel)
+            .stream(Some(StateValue::String("start".to_string())))
+            .unwrap();
+
+        let item = receiver.recv().await.unwrap().unwrap();
+
+        assert_eq!(item.step, 1);
+        assert_eq!(item.mode, StreamMode::Updates);
+        assert_eq!(
+            item.data,
+            StateValue::Object(HashMap::from([(
+                "b".to_string(),
+                StateValue::String("a".to_string())
+            )]))
+        );
         assert!(receiver.recv().await.is_none());
     }
 

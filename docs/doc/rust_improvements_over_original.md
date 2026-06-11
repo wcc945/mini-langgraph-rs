@@ -346,9 +346,9 @@ Rust 版当前没有 checkpoint、channel version、pending writes 持久化和 
 
 源项目 `PregelLoop.tick()` 负责检查步数、调用 `prepare_next_tasks`、处理中断/调试/缓存写入恢复，并把是否继续执行返回给外层 runner；`after_tick()` 则在任务执行完成后调用 `apply_writes`、输出 stream values、清理 checkpoint pending writes、保存 checkpoint 并推进运行状态。
 
-Rust 版当前只迁移无 checkpoint 的同步主线：`tick()` 清理上一轮 task 集合，根据 `updated_channels` 准备本轮 PULL tasks，空任务时进入 `Done`，超过递归限制时进入 `OutOfSteps` 并返回 `PregelRecursionLimitReached`。`execute()` 仍只运行已准备任务并收集 `PregelTaskWrites`。`after_tick()` 使用 `apply_writes` 应用本轮 pending writes，把返回的 channel 集合作为下一轮 `updated_channels`，然后递增 `step`。
+Rust 版当前只迁移无 checkpoint 的同步主线：`tick()` 清理上一轮 task 集合，根据 `updated_channels` 准备本轮 PULL tasks，空任务时进入 `Done`，超过递归限制时进入 `OutOfSteps` 并返回 `PregelRecursionLimitReached`。`execute()` 运行已准备任务并收集 `PregelTaskWrites`，在 `StreamMode::Updates` 下把命中 stream/output channels 的 task writes 映射为 `StateValue::Object({ node: update })` 后发送给调用方。`after_tick()` 使用 `apply_writes` 应用本轮 pending writes，把返回的 channel 集合作为下一轮 `updated_channels`，并在 `StreamMode::Values` 下读取 stream/output channels 的可用快照发送给调用方，然后递增 `step`。
 
-由于没有 checkpoint 版本表，Rust 版不会复制源项目基于 `versions_seen` 的精确重复执行判断；当前仍以 channel `is_available()` 和上一轮 `updated_channels` 的 trigger 索引作为最小调度条件。values/updates stream item、checkpoint pending writes、interrupt、retry、cache、timeout、PUSH/Send task 和 error handler 仍暂缓。
+由于没有 checkpoint 版本表，Rust 版不会复制源项目基于 `versions_seen` 的精确重复执行判断；当前仍以 channel `is_available()` 和上一轮 `updated_channels` 的 trigger 索引作为最小调度条件。stream 输出也只保留源项目 `map_output_updates` / `map_output_values` 的核心形状：`updates` 不暴露控制流 trigger channel，`values` 不读取不可用 channel，多输出或多节点更新通过 `StateValue::Object` / `StateValue::List` 表达。多 stream mode 列表、checkpoint pending writes、interrupt、debug/tasks/messages/custom stream、retry、cache、timeout、PUSH/Send task 和 error handler 仍暂缓。
 ## 当前仍需谨慎的地方
 
 - 当前源码仍是骨架，很多类型未公开或未使用，warning 是预期状态。
