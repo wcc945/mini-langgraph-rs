@@ -228,7 +228,32 @@ where
         Ok(updated_channels)
     }
     pub(crate) fn tick(&mut self) -> Result<bool, GraphError> {
-        Ok(false)
+        if self.step > self.stop {
+            self.status = PregelLoopStatus::OutOfSteps;
+            return Err(GraphError::PregelRecursionLimitReached(
+                self.recursion_limit,
+            ));
+        }
+
+        self.pending_writes.clear();
+        self.task_manager.clear_tasks();
+
+        let tasks = self.task_manager.prepare_tasks(
+            self.nodes,
+            &self.channels,
+            &self.managed,
+            self.trigger_to_nodes,
+            self.updated_channels.as_ref(),
+            self.step,
+        )?;
+
+        if tasks.is_empty() {
+            self.status = PregelLoopStatus::Done;
+            return Ok(false);
+        }
+
+        self.status = PregelLoopStatus::Pending;
+        Ok(true)
     }
 
     pub(crate) fn execute(&mut self) -> Result<(), GraphError>
@@ -245,6 +270,12 @@ where
     }
 
     pub(crate) async fn after_tick(&mut self) -> Result<(), GraphError> {
+        let pending_writes = std::mem::take(&mut self.pending_writes);
+        let updated_channels = self.apply_writes(&pending_writes)?;
+
+        self.updated_channels = Some(updated_channels);
+        self.step += 1;
+
         Ok(())
     }
 
@@ -833,6 +864,115 @@ mod tests {
             loop_state.channels.get("finish").unwrap().get().unwrap(),
             StateValue::String("done".to_string())
         );
+    }
+
+    #[test]
+    fn tick_prepares_tasks_from_updated_channels() {
+        let pregel = valid_pregel();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut loop_state = PregelLoop::new(
+            &pregel,
+            Some(StateValue::String("start".to_string())),
+            sender,
+        )
+        .unwrap();
+        loop_state.enter().unwrap();
+
+        let should_continue = loop_state.tick().unwrap();
+
+        assert!(should_continue);
+        assert_eq!(loop_state.status, PregelLoopStatus::Pending);
+        assert!(loop_state.pending_writes.is_empty());
+        assert_eq!(loop_state.task_manager.task_count(), 1);
+    }
+
+    #[test]
+    fn tick_returns_false_and_marks_done_without_tasks() {
+        let mut pregel = valid_pregel();
+        pregel
+            .channels
+            .insert("input".to_string(), Box::new(ChangedUnavailable));
+        pregel.validate().unwrap();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut loop_state = PregelLoop::new(
+            &pregel,
+            Some(StateValue::String("start".to_string())),
+            sender,
+        )
+        .unwrap();
+        loop_state.enter().unwrap();
+
+        let should_continue = loop_state.tick().unwrap();
+
+        assert!(!should_continue);
+        assert_eq!(loop_state.status, PregelLoopStatus::Done);
+        assert_eq!(loop_state.task_manager.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn after_tick_applies_pending_writes_and_advances_step() {
+        let pregel = Pregel::new(
+            HashMap::from([(
+                "a".to_string(),
+                PregelNode::new(
+                    vec!["input".to_string()],
+                    vec!["input".to_string()],
+                    None,
+                    vec![fixed_writer(
+                        "output",
+                        StateValue::String("done".to_string()),
+                    )],
+                    Box::new(|_, _| Ok(NodeOutput::<StateValue>::None)),
+                ),
+            )]),
+            HashMap::from([
+                ("input".to_string(), channel()),
+                ("output".to_string(), channel()),
+            ]),
+            HashMap::new(),
+            vec!["input".to_string()],
+            vec!["output".to_string()],
+        )
+        .unwrap();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut loop_state = PregelLoop::new(
+            &pregel,
+            Some(StateValue::String("start".to_string())),
+            sender,
+        )
+        .unwrap();
+        loop_state.enter().unwrap();
+
+        assert!(loop_state.tick().unwrap());
+        loop_state.execute().unwrap();
+        loop_state.after_tick().await.unwrap();
+
+        assert_eq!(loop_state.step, 1);
+        assert!(loop_state.pending_writes.is_empty());
+        assert_eq!(
+            loop_state.updated_channels,
+            Some(HashSet::from(["output".to_string()]))
+        );
+        assert_eq!(
+            loop_state.channels.get("output").unwrap().get().unwrap(),
+            StateValue::String("done".to_string())
+        );
+    }
+
+    #[test]
+    fn tick_rejects_step_beyond_recursion_limit() {
+        let pregel = valid_pregel();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        loop_state.step = loop_state.stop + 1;
+
+        let error = loop_state.tick().unwrap_err();
+
+        assert_eq!(loop_state.status, PregelLoopStatus::OutOfSteps);
+        assert!(matches!(
+            error,
+            GraphError::PregelRecursionLimitReached(limit) if limit == pregel.recursion_limit
+        ));
     }
 
     #[test]

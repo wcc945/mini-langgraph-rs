@@ -302,7 +302,7 @@ pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
 
 源项目 `PregelLoop` / `SyncPregelLoop` 同时承载运行时核心状态和 checkpoint、cache、store、interrupt、debug stream、retry、async executor、生命周期事件等平台能力。Rust 版当前只实现同步 Pregel 主线需要的运行态，并把图规格与运行状态分开：`Pregel` 保存 nodes、channel 原型和配置，`PregelLoop` 持有本次运行复制出的 channels、step、pending writes、updated channels 和输出缓存。
 
-当前 `PregelLoop::new` 从 `Pregel.channels` 和 `Pregel.managed` 复制本次运行专用 map，不再借用或共享这两类运行态。`PregelLoop::enter` 对齐源项目 `SyncPregelLoop.__enter__` 的调用边界，并调用 Rust 版 `first` 执行 fresh input 初始化；`first` 只迁移源项目 `_first` 中“输入映射为 channel 写入并产生 `updated_channels`”的主线。`execute` 已接入当前 superstep 已准备任务的执行和 pending writes 收集，并保持源项目“执行阶段只产出 writes，Update 阶段再应用 channel”的边界。`tick`、`after_tick` 和 `is_stream_closed` 目前仍只保留接口形状，不实现真实调度、更新或发送逻辑；后续补实现时应保持源项目语义：`tick` 只返回是否继续，`execute` 和 `after_tick` 不把 stream chunk 作为返回值暴露给外层，发送动作由 loop 持有的 sender 内部完成。
+当前 `PregelLoop::new` 从 `Pregel.channels` 和 `Pregel.managed` 复制本次运行专用 map，不再借用或共享这两类运行态。`PregelLoop::enter` 对齐源项目 `SyncPregelLoop.__enter__` 的调用边界，并调用 Rust 版 `first` 执行 fresh input 初始化；`first` 只迁移源项目 `_first` 中“输入映射为 channel 写入并产生 `updated_channels`”的主线。`tick` 已接入源项目 Plan 阶段的最小主线：检查递归限制，根据上一轮 `updated_channels` 准备 PULL tasks，无任务时标记 `Done`。`execute` 已接入当前 superstep 已准备任务的执行和 pending writes 收集，并保持源项目“执行阶段只产出 writes，Update 阶段再应用 channel”的边界。`after_tick` 已接入最小 Update 阶段：应用 pending writes、刷新 `updated_channels`、清空 pending writes 并推进 `step`。`is_stream_closed` 目前仍只保留接口形状，不实现真实发送或关闭语义。
 
 源项目 `_first` 还处理 checkpoint、resume、Command、time travel、delta channel、interrupt 等路径。Rust 版当前没有这些运行时能力，因此 `first` 不写入 pending writes，也不把 `None` 输入解释为 resume；`None` 或无法映射到 input channel 的输入会返回明确错误。
 
@@ -341,6 +341,14 @@ Rust 版当前把对外执行入口收敛为 `PregelTaskManager::execute_pending
 Rust 版当前没有 checkpoint、channel version、pending writes 持久化和 reserved control channel 表，因此 `PregelLoop::apply_writes` 只迁移当前运行时能表达的核心语义：按 task path 前 3 段排序，消费 task triggers 读过的 channel，按 channel 聚合同轮 writes，调用 `BaseChannel::update(values)`，对未更新但可用的 channel 调用空更新，并在本轮更新无法触发后续节点时调用 `finish()`。
 
 未知 channel 写入沿用源项目 warning 后忽略的方向；mini 版暂不接入日志系统，因此实现为静默忽略。返回值只包含更新后仍 `is_available()` 的 channel，用于后续调度判断。`first(input_channels)` 对齐源项目 `_first(input_keys=...)` 的显式输入 channel 参数；fresh input 路径已复用同一写入应用原语：输入先按传入的 input channels 映射为 input writes，再构造无 triggers 的 `PregelTaskWrites` 并直接调用 `apply_writes` 写入 channel。但仍不提前引入源项目 `_first` 中 discard task、checkpoint resume 或 Command 输入路径。
+
+## 21. `tick -> execute -> after_tick` 形成最小同步闭环
+
+源项目 `PregelLoop.tick()` 负责检查步数、调用 `prepare_next_tasks`、处理中断/调试/缓存写入恢复，并把是否继续执行返回给外层 runner；`after_tick()` 则在任务执行完成后调用 `apply_writes`、输出 stream values、清理 checkpoint pending writes、保存 checkpoint 并推进运行状态。
+
+Rust 版当前只迁移无 checkpoint 的同步主线：`tick()` 清理上一轮 task 集合，根据 `updated_channels` 准备本轮 PULL tasks，空任务时进入 `Done`，超过递归限制时进入 `OutOfSteps` 并返回 `PregelRecursionLimitReached`。`execute()` 仍只运行已准备任务并收集 `PregelTaskWrites`。`after_tick()` 使用 `apply_writes` 应用本轮 pending writes，把返回的 channel 集合作为下一轮 `updated_channels`，然后递增 `step`。
+
+由于没有 checkpoint 版本表，Rust 版不会复制源项目基于 `versions_seen` 的精确重复执行判断；当前仍以 channel `is_available()` 和上一轮 `updated_channels` 的 trigger 索引作为最小调度条件。values/updates stream item、checkpoint pending writes、interrupt、retry、cache、timeout、PUSH/Send task 和 error handler 仍暂缓。
 ## 当前仍需谨慎的地方
 
 - 当前源码仍是骨架，很多类型未公开或未使用，warning 是预期状态。

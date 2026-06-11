@@ -58,6 +58,15 @@ where
         self.tasks.insert(task.id.clone(), task);
     }
 
+    pub(crate) fn clear_tasks(&mut self) {
+        self.tasks.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_count(&self) -> usize {
+        self.tasks.len()
+    }
+
     pub(crate) fn prepare_tasks(
         &mut self,
         nodes: &'a HashMap<String, PregelNode<StateT, UpdateT, ContextT>>,

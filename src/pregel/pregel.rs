@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_returns_receiver_and_closes_without_loop_logic() {
+    async fn stream_executes_loop_and_closes_without_output_items() {
         let pregel = Arc::new(stream_pregel());
         let mut receiver = pregel
             .stream(Some(StateValue::String("start".to_string())))
