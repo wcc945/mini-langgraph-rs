@@ -539,7 +539,7 @@ mod tests {
         let compiled = graph.compile().unwrap();
         let start = compiled.pregel.nodes.get(START).unwrap();
         let node = compiled.pregel.nodes.get("a").unwrap();
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
         let writes = start.writers[0]
             .assemble(&StateValue::Null, false, &0, &context)
             .unwrap();
@@ -652,7 +652,9 @@ mod tests {
         graph.set_finish_point("write").unwrap();
         let compiled = graph.compile().unwrap();
 
-        let output = compiled.invoke(Some(StateValue::Null)).unwrap();
+        let output = compiled
+            .invoke(Some(StateValue::Null), RuntimeContext::default())
+            .unwrap();
 
         assert_eq!(output, StateValue::String("done".to_string()));
     }
@@ -679,7 +681,11 @@ mod tests {
         let compiled = graph.compile().unwrap();
 
         let mut receiver = compiled
-            .stream_with_mode(Some(StateValue::Null), StreamMode::Updates)
+            .stream_with_mode(
+                Some(StateValue::Null),
+                RuntimeContext::default(),
+                StreamMode::Updates,
+            )
             .unwrap();
         let item = receiver.recv().await.unwrap().unwrap();
 
@@ -725,7 +731,9 @@ mod tests {
         graph.set_finish_point("next").unwrap();
         let compiled = graph.compile().unwrap();
 
-        let output = compiled.invoke(Some(StateValue::Null)).unwrap();
+        let output = compiled
+            .invoke(Some(StateValue::Null), RuntimeContext::default())
+            .unwrap();
 
         assert_eq!(output, StateValue::String("routed".to_string()));
     }
@@ -759,7 +767,9 @@ mod tests {
         graph.set_finish_point("join").unwrap();
         let compiled = graph.compile().unwrap();
 
-        let output = compiled.invoke(Some(StateValue::Null)).unwrap();
+        let output = compiled
+            .invoke(Some(StateValue::Null), RuntimeContext::default())
+            .unwrap();
 
         assert_eq!(output, StateValue::String("joined".to_string()));
     }
@@ -858,7 +868,7 @@ mod tests {
 
         let compiled = graph.compile().unwrap();
         let start = compiled.pregel.nodes.get(START).unwrap();
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
         let writes = start.writers[0]
             .assemble(&StateValue::Null, false, &0, &context)
             .unwrap();
@@ -883,7 +893,7 @@ mod tests {
 
         let compiled = graph.compile().unwrap();
         let node = compiled.pregel.nodes.get("a").unwrap();
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
         let writes = node.writers[1]
             .assemble(&StateValue::Null, false, &0, &context)
             .unwrap();

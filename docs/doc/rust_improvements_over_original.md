@@ -26,7 +26,7 @@ Rust 版当前采用统一节点函数类型：
 dyn Fn(&NodeInputT, &RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>
 ```
 
-所有运行时依赖统一放入 `RuntimeContext<ContextT>`，避免在运行时识别函数参数。该上下文按源项目 `Runtime.context` 的定位作为只读运行依赖视图，不作为节点之间共享可变状态；需要可变共享资源时由调用方显式放入线程安全类型。后续如果需要适配不使用 context 的闭包，可以在 `add_node` 层做轻量 adapter，而不是复制完整 `Runnable` 生态。
+所有运行时依赖统一放入 `RuntimeContext<ContextT>`，避免在运行时识别函数参数。该上下文按源项目 `Runtime.context` 的定位作为只读运行依赖视图，不作为节点之间共享可变状态；需要可变共享资源时由调用方显式放入线程安全类型。当前 `RuntimeContext` 还包含 `stream_mode: Option<StreamMode>`，用于按单次运行覆盖默认 stream 输出模式。后续如果需要适配不使用 context 的闭包，可以在 `add_node` 层做轻量 adapter，而不是复制完整 `Runnable` 生态。
 
 ## 3. 区分局部更新和节点完整输出
 
@@ -298,7 +298,7 @@ pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
 
 源项目 `StateGraph.compile()` 会分别计算 `output_channels` 与 `stream_channels` 并传入 `CompiledStateGraph`。Rust 版当前还没有独立 input/output schema projection，因此先让 `stream_channels` 默认等于 `output_channels`，后续引入 schema 后再拆分两者。
 
-当前不复制源项目的完整 checkpoint 或 stream 路径；`PregelNode.bound` 直接复用 builder 中的节点函数，`mapper` 暂不接入真实状态投影协议。源项目通过 `ChannelWrite.register_writer(branch.run(...))` 把分支 runnable 标记为 writer；Rust 版用泛型可执行 `ChannelWriter` 表达同一编译边界，让 writer 能访问 `&StateT` 和 `RuntimeContext` 后返回 `ChannelWriteEntry`。该实现暂不迁移 schema reader、`Send`、async 或 Runnable 生态。waiting edge 已按源项目 `attach_edge(starts, end)` 路径编译为 `NamedBarrierValue` join channel，目标节点订阅 join channel，各起点节点写入自己的节点名。`CompiledStateGraph` 当前公开 `invoke`、`stream` 和 `stream_with_mode`，但一次 stream 调用仍只接受一个 `StreamMode`，不复制源项目多 stream mode 的复合输出协议。
+当前不复制源项目的完整 checkpoint 或 stream 路径；`PregelNode.bound` 直接复用 builder 中的节点函数，`mapper` 暂不接入真实状态投影协议。源项目通过 `ChannelWrite.register_writer(branch.run(...))` 把分支 runnable 标记为 writer；Rust 版用泛型可执行 `ChannelWriter` 表达同一编译边界，让 writer 能访问 `&StateT` 和 `RuntimeContext` 后返回 `ChannelWriteEntry`。该实现暂不迁移 schema reader、`Send`、async 或 Runnable 生态。waiting edge 已按源项目 `attach_edge(starts, end)` 路径编译为 `NamedBarrierValue` join channel，目标节点订阅 join channel，各起点节点写入自己的节点名。`CompiledStateGraph` 当前公开 `invoke(input, runtime_context)`、`stream(input, runtime_context)` 和 `stream_with_mode(input, runtime_context, mode)`；一次 stream 调用仍只接受一个 `StreamMode`，不复制源项目多 stream mode 的复合输出协议。
 
 ## 16. PregelLoop 持有每次运行的独立状态
 

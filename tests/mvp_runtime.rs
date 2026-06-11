@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use mini_langgraph_rs::{GraphError, NodeOutput, START, StateGraph, StateValue, StreamMode};
+use mini_langgraph_rs::{
+    GraphError, NodeOutput, RuntimeContext, START, StateGraph, StateValue, StreamMode,
+};
 
 fn update_value(value: impl Into<StateValue>) -> StateValue {
     StateValue::Object(HashMap::from([("value".to_string(), value.into())]))
@@ -23,7 +25,9 @@ fn invoke_runs_compiled_state_graph_and_returns_final_output() {
     graph.set_finish_point("write").unwrap();
     let compiled = graph.compile().unwrap();
 
-    let output = compiled.invoke(Some(StateValue::Null)).unwrap();
+    let output = compiled
+        .invoke(Some(StateValue::Null), RuntimeContext::default())
+        .unwrap();
 
     assert_eq!(output, StateValue::String("done".to_string()));
 }
@@ -41,7 +45,9 @@ async fn default_stream_emits_values_items() {
     graph.set_finish_point("write").unwrap();
     let compiled = graph.compile().unwrap();
 
-    let mut receiver = compiled.stream(Some(StateValue::Null)).unwrap();
+    let mut receiver = compiled
+        .stream(Some(StateValue::Null), RuntimeContext::default())
+        .unwrap();
     let item = receiver.recv().await.unwrap().unwrap();
 
     assert_eq!(item.mode, StreamMode::Values);
@@ -63,7 +69,11 @@ async fn stream_with_updates_emits_node_updates() {
     let compiled = graph.compile().unwrap();
 
     let mut receiver = compiled
-        .stream_with_mode(Some(StateValue::Null), StreamMode::Updates)
+        .stream_with_mode(
+            Some(StateValue::Null),
+            RuntimeContext::default(),
+            StreamMode::Updates,
+        )
         .unwrap();
     let item = receiver.recv().await.unwrap().unwrap();
 
@@ -75,6 +85,53 @@ async fn stream_with_updates_emits_node_updates() {
             StateValue::Number(1.0)
         )]))
     );
+}
+
+#[tokio::test]
+async fn stream_uses_stream_mode_from_runtime_context() {
+    let mut graph = graph_with_value_channel();
+    graph
+        .add_node(
+            "write",
+            Box::new(|_, _| Ok(NodeOutput::Update(update_value("context-mode")))),
+        )
+        .unwrap();
+    graph.set_entry_point("write").unwrap();
+    graph.set_finish_point("write").unwrap();
+    let compiled = graph.compile().unwrap();
+    let context = RuntimeContext::new(()).with_stream_mode(StreamMode::Updates);
+
+    let mut receiver = compiled.stream(Some(StateValue::Null), context).unwrap();
+    let item = receiver.recv().await.unwrap().unwrap();
+
+    assert_eq!(item.mode, StreamMode::Updates);
+    assert_eq!(
+        item.data,
+        StateValue::Object(HashMap::from([(
+            "write".to_string(),
+            StateValue::String("context-mode".to_string())
+        )]))
+    );
+}
+
+#[test]
+fn invoke_passes_runtime_context_to_nodes() {
+    let mut graph: StateGraph<StateValue, StateValue, i64> = StateGraph::with_channels(["value"]);
+    graph
+        .add_node(
+            "write",
+            Box::new(|_, runtime| Ok(NodeOutput::Update(update_value(runtime.context)))),
+        )
+        .unwrap();
+    graph.set_entry_point("write").unwrap();
+    graph.set_finish_point("write").unwrap();
+    let compiled = graph.compile().unwrap();
+
+    let output = compiled
+        .invoke(Some(StateValue::Null), RuntimeContext::new(7_i64))
+        .unwrap();
+
+    assert_eq!(output, StateValue::Number(7.0));
 }
 
 #[test]
@@ -101,7 +158,9 @@ fn conditional_edge_routes_to_selected_node() {
     graph.set_finish_point("next").unwrap();
     let compiled = graph.compile().unwrap();
 
-    let output = compiled.invoke(Some(StateValue::Null)).unwrap();
+    let output = compiled
+        .invoke(Some(StateValue::Null), RuntimeContext::default())
+        .unwrap();
 
     assert_eq!(output, StateValue::String("routed".to_string()));
 }
@@ -127,7 +186,9 @@ fn waiting_edge_runs_after_all_start_nodes_finish() {
     graph.set_finish_point("join").unwrap();
     let compiled = graph.compile().unwrap();
 
-    let output = compiled.invoke(Some(StateValue::Null)).unwrap();
+    let output = compiled
+        .invoke(Some(StateValue::Null), RuntimeContext::default())
+        .unwrap();
 
     assert_eq!(output, StateValue::String("joined".to_string()));
 }
@@ -145,8 +206,12 @@ fn repeated_invokes_use_isolated_runtime_state() {
     graph.set_finish_point("write").unwrap();
     let compiled = graph.compile().unwrap();
 
-    let first = compiled.invoke(Some(StateValue::Null)).unwrap();
-    let second = compiled.invoke(Some(StateValue::Null)).unwrap();
+    let first = compiled
+        .invoke(Some(StateValue::Null), RuntimeContext::default())
+        .unwrap();
+    let second = compiled
+        .invoke(Some(StateValue::Null), RuntimeContext::default())
+        .unwrap();
 
     assert_eq!(first, StateValue::String("fresh".to_string()));
     assert_eq!(second, StateValue::String("fresh".to_string()));
@@ -162,7 +227,7 @@ async fn none_input_is_reported_as_empty_input() {
     graph.set_finish_point("write").unwrap();
     let compiled = graph.compile().unwrap();
 
-    let mut receiver = compiled.stream(None).unwrap();
+    let mut receiver = compiled.stream(None, RuntimeContext::default()).unwrap();
     let error = receiver.recv().await.unwrap().unwrap_err();
 
     assert!(matches!(
@@ -184,7 +249,9 @@ fn command_outputs_are_reported_as_unsupported() {
     graph.set_finish_point("command").unwrap();
     let compiled = graph.compile().unwrap();
 
-    let error = compiled.invoke(Some(StateValue::Null)).unwrap_err();
+    let error = compiled
+        .invoke(Some(StateValue::Null), RuntimeContext::default())
+        .unwrap_err();
 
     assert!(matches!(error, GraphError::UnsupportedPregelCommand));
 }

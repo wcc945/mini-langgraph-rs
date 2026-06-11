@@ -65,7 +65,7 @@ mod tests {
             vec![writer("output")],
             Box::new(|input, context| Ok(NodeOutput::Update(input + context.context))),
         );
-        let context = RuntimeContext { context: 3 };
+        let context = RuntimeContext::new(3);
         let mapped = node.mapper.as_ref().unwrap()(StateValue::Null).unwrap();
         let output = (node.bound)(&mapped, &context).unwrap();
         let writes = node.writers[0]
@@ -97,7 +97,7 @@ mod tests {
             Vec::new(),
             Box::new(|input, _| Ok(NodeOutput::Update(input * 2))),
         );
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
 
         let mapped = node.mapper.as_ref().unwrap()(StateValue::Number(2.0)).unwrap();
         let output = (node.bound)(&mapped, &context).unwrap();

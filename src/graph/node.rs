@@ -37,7 +37,7 @@ mod tests {
         let spec = StateNodeSpec::new(Box::new(|state: &i32, context: &RuntimeContext<i32>| {
             Ok(NodeOutput::Update(*state + context.context))
         }));
-        let context = RuntimeContext { context: 2 };
+        let context = RuntimeContext::new(2);
 
         let output = (spec.runnable)(&5, &context).unwrap();
 

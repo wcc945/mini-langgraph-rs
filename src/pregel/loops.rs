@@ -52,21 +52,14 @@ where
     pub(crate) fn new(
         pregel: &'a Pregel<StateT, UpdateT, ContextT>,
         input: Option<StateValue>,
-        stream_sender: mpsc::Sender<Result<PregelStreamItem, GraphError>>,
-    ) -> Result<Self, GraphError> {
-        Self::new_with_stream_mode(pregel, input, pregel.stream_mode, stream_sender)
-    }
-
-    pub(crate) fn new_with_stream_mode(
-        pregel: &'a Pregel<StateT, UpdateT, ContextT>,
-        input: Option<StateValue>,
-        stream_mode: StreamMode,
+        runtime_context: RuntimeContext<ContextT>,
         stream_sender: mpsc::Sender<Result<PregelStreamItem, GraphError>>,
     ) -> Result<Self, GraphError> {
         let channels = pregel.copy_channels()?;
         let managed = pregel.copy_managed();
         let recursion_limit = pregel.recursion_limit;
         let stop = recursion_limit + 1;
+        let stream_mode = runtime_context.stream_mode.unwrap_or(pregel.stream_mode);
 
         Ok(Self {
             nodes: &pregel.nodes,
@@ -88,9 +81,7 @@ where
             output: None,
             stream_sender,
             pending_writes: Vec::new(),
-            runtime_context: RuntimeContext {
-                context: ContextT::default(),
-            },
+            runtime_context,
         })
     }
 
@@ -694,12 +685,20 @@ mod tests {
         .unwrap()
     }
 
+    fn new_loop<'a>(
+        pregel: &'a Pregel<StateValue, StateValue, ()>,
+        input: Option<StateValue>,
+        sender: mpsc::Sender<Result<PregelStreamItem, GraphError>>,
+    ) -> PregelLoop<'a, StateValue, StateValue, ()> {
+        PregelLoop::new(pregel, input, RuntimeContext::default(), sender).unwrap()
+    }
+
     #[test]
     fn initializes_loop_with_copied_channels() {
         let pregel = valid_pregel();
         let expected_stop = pregel.recursion_limit + 1;
         let (sender, _receiver) = mpsc::channel(1);
-        let loop_state = PregelLoop::new(&pregel, Some(StateValue::Number(1.0)), sender).unwrap();
+        let loop_state = new_loop(&pregel, Some(StateValue::Number(1.0)), sender);
 
         assert_eq!(loop_state.input, Some(StateValue::Number(1.0)));
         assert_eq!(loop_state.step, 0);
@@ -723,8 +722,7 @@ mod tests {
     fn enter_applies_single_input_channel() {
         let pregel = valid_pregel();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state =
-            PregelLoop::new(&pregel, Some(StateValue::Number(1.0)), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Number(1.0)), sender);
 
         loop_state.enter().unwrap();
 
@@ -757,7 +755,7 @@ mod tests {
                 StateValue::String("third".to_string()),
             ),
         ]));
-        let mut loop_state = PregelLoop::new(&pregel, Some(input), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(input), sender);
 
         loop_state.enter().unwrap();
 
@@ -780,7 +778,7 @@ mod tests {
     fn enter_rejects_empty_input() {
         let pregel = valid_pregel();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, None, sender).unwrap();
+        let mut loop_state = new_loop(&pregel, None, sender);
 
         let error = loop_state.enter().unwrap_err();
 
@@ -796,12 +794,11 @@ mod tests {
         pregel.input_channels = vec!["input".to_string(), "other".to_string()];
         pregel.validate().unwrap();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(
+        let mut loop_state = new_loop(
             &pregel,
             Some(StateValue::String("not an object".to_string())),
             sender,
-        )
-        .unwrap();
+        );
 
         let error = loop_state.enter().unwrap_err();
 
@@ -816,12 +813,11 @@ mod tests {
             .insert("input".to_string(), Box::new(ChangedUnavailable));
         pregel.validate().unwrap();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(
+        let mut loop_state = new_loop(
             &pregel,
             Some(StateValue::String("value".to_string())),
             sender,
-        )
-        .unwrap();
+        );
 
         loop_state.enter().unwrap();
 
@@ -844,7 +840,7 @@ mod tests {
             ),
         ]));
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, Some(input), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(input), sender);
         let input_channels = vec!["other".to_string(), "unused".to_string()];
 
         let updated = loop_state.first(&input_channels).unwrap();
@@ -871,7 +867,7 @@ mod tests {
             Box::new(BinaryOperatorAggregate::new(add_list)),
         );
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
         let tasks = vec![
             task(
                 "later",
@@ -904,7 +900,7 @@ mod tests {
         let mut pregel = valid_pregel();
         pregel.channels.insert("single".to_string(), channel());
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
         let tasks = vec![
             task(
                 "a",
@@ -932,7 +928,7 @@ mod tests {
     fn apply_writes_ignores_unknown_channels() {
         let pregel = valid_pregel();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
         let tasks = vec![task(
             "a",
             vec!["pull", "a"],
@@ -950,7 +946,7 @@ mod tests {
     fn output_reads_single_output_channel() {
         let pregel = valid_pregel();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
         loop_state
             .apply_writes(&[task(
                 "a",
@@ -974,7 +970,7 @@ mod tests {
         pregel.channels.insert("right".to_string(), channel());
         pregel.validate().unwrap();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
         loop_state
             .apply_writes(&[task(
                 "a",
@@ -1006,7 +1002,7 @@ mod tests {
             .channels
             .insert("join".to_string(), Box::new(barrier));
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
         let tasks = vec![task("a", vec!["pull", "a"], vec!["join"], vec![])];
 
         let updated = loop_state.apply_writes(&tasks).unwrap();
@@ -1024,7 +1020,7 @@ mod tests {
             .channels
             .insert("signal".to_string(), Box::new(signal));
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
         let tasks = vec![task("a", vec!["pull", "a"], vec!["input"], vec![])];
 
         let updated = loop_state.apply_writes(&tasks).unwrap();
@@ -1046,7 +1042,7 @@ mod tests {
             Box::new(FinishOnDemand::new(StateValue::String("done".to_string()))),
         );
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
         let tasks = vec![task(
             "input",
             vec!["input"],
@@ -1069,7 +1065,7 @@ mod tests {
             Box::new(FinishOnDemand::new(StateValue::String("done".to_string()))),
         );
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
         let tasks = vec![task(
             "a",
             vec!["pull", "a"],
@@ -1093,12 +1089,11 @@ mod tests {
     fn tick_prepares_tasks_from_updated_channels() {
         let pregel = valid_pregel();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(
+        let mut loop_state = new_loop(
             &pregel,
             Some(StateValue::String("start".to_string())),
             sender,
-        )
-        .unwrap();
+        );
         loop_state.enter().unwrap();
 
         let should_continue = loop_state.tick().unwrap();
@@ -1117,12 +1112,11 @@ mod tests {
             .insert("input".to_string(), Box::new(ChangedUnavailable));
         pregel.validate().unwrap();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(
+        let mut loop_state = new_loop(
             &pregel,
             Some(StateValue::String("start".to_string())),
             sender,
-        )
-        .unwrap();
+        );
         loop_state.enter().unwrap();
 
         let should_continue = loop_state.tick().unwrap();
@@ -1158,12 +1152,11 @@ mod tests {
         )
         .unwrap();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(
+        let mut loop_state = new_loop(
             &pregel,
             Some(StateValue::String("start".to_string())),
             sender,
-        )
-        .unwrap();
+        );
         loop_state.enter().unwrap();
 
         assert!(loop_state.tick().unwrap());
@@ -1186,7 +1179,7 @@ mod tests {
     fn tick_rejects_step_beyond_recursion_limit() {
         let pregel = valid_pregel();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
         loop_state.step = loop_state.stop + 1;
 
         let error = loop_state.tick().unwrap_err();
@@ -1224,12 +1217,11 @@ mod tests {
         )
         .unwrap();
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(
+        let mut loop_state = new_loop(
             &pregel,
             Some(StateValue::String("start".to_string())),
             sender,
-        )
-        .unwrap();
+        );
         loop_state.enter().unwrap();
         {
             let tasks = loop_state
@@ -1287,12 +1279,11 @@ mod tests {
         .unwrap();
         pregel.stream_mode = StreamMode::Updates;
         let (sender, mut receiver) = mpsc::channel(4);
-        let mut loop_state = PregelLoop::new(
+        let mut loop_state = new_loop(
             &pregel,
             Some(StateValue::String("start".to_string())),
             sender,
-        )
-        .unwrap();
+        );
         loop_state.enter().unwrap();
         assert!(loop_state.tick().unwrap());
 
@@ -1335,12 +1326,11 @@ mod tests {
         .unwrap();
         pregel.stream_mode = StreamMode::Updates;
         let (sender, mut receiver) = mpsc::channel(4);
-        let mut loop_state = PregelLoop::new(
+        let mut loop_state = new_loop(
             &pregel,
             Some(StateValue::String("start".to_string())),
             sender,
-        )
-        .unwrap();
+        );
         loop_state.enter().unwrap();
         assert!(loop_state.tick().unwrap());
 
@@ -1375,12 +1365,11 @@ mod tests {
         )
         .unwrap();
         let (sender, mut receiver) = mpsc::channel(4);
-        let mut loop_state = PregelLoop::new(
+        let mut loop_state = new_loop(
             &pregel,
             Some(StateValue::String("start".to_string())),
             sender,
-        )
-        .unwrap();
+        );
         loop_state.enter().unwrap();
         assert!(loop_state.tick().unwrap());
         loop_state.execute().unwrap();
@@ -1417,12 +1406,11 @@ mod tests {
         )
         .unwrap();
         let (sender, mut receiver) = mpsc::channel(4);
-        let mut loop_state = PregelLoop::new(
+        let mut loop_state = new_loop(
             &pregel,
             Some(StateValue::String("start".to_string())),
             sender,
-        )
-        .unwrap();
+        );
         loop_state.enter().unwrap();
         assert!(loop_state.tick().unwrap());
         loop_state.execute().unwrap();
@@ -1436,7 +1424,7 @@ mod tests {
     fn is_stream_closed_reflects_receiver_drop() {
         let pregel = valid_pregel();
         let (sender, receiver) = mpsc::channel(1);
-        let loop_state = PregelLoop::new(&pregel, Some(StateValue::Null), sender).unwrap();
+        let loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
 
         drop(receiver);
 

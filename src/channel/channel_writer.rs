@@ -217,7 +217,7 @@ mod tests {
         output: StateValue,
         allow_passthrough: bool,
     ) -> Result<Vec<(String, StateValue)>, GraphError> {
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
         writer.assemble(&output, allow_passthrough, &(), &context)
     }
 
@@ -388,7 +388,7 @@ mod tests {
                 }])
             },
         ))]);
-        let context = RuntimeContext { context: 2 };
+        let context = RuntimeContext::new(2);
 
         let writes = writer
             .assemble(&StateValue::Null, false, &3, &context)

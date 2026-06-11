@@ -16,6 +16,7 @@ use crate::graph::node::{NodeOutput, StateNodeSpec};
 use crate::managed::ManagedValueSpec;
 use crate::pregel::node::PregelNode;
 use crate::pregel::pregel::{Pregel, PregelStreamItem, StreamMode};
+use crate::runtime::RuntimeContext;
 use tokio::sync::mpsc;
 
 pub struct CompiledStateGraph<StateT, UpdateT, ContextT = (), InputT = StateT, OutputT = StateT> {
@@ -161,18 +162,20 @@ where
     pub fn stream(
         &self,
         input: Option<StateValue>,
+        runtime_context: RuntimeContext<ContextT>,
     ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError>
     where
         StateT: From<StateValue> + Send + 'static,
         UpdateT: Into<StateValue> + Send + 'static,
         ContextT: Default + Send + Sync + 'static,
     {
-        Arc::clone(&self.pregel).stream(input)
+        Arc::clone(&self.pregel).stream(input, runtime_context)
     }
 
     pub fn stream_with_mode(
         &self,
         input: Option<StateValue>,
+        runtime_context: RuntimeContext<ContextT>,
         stream_mode: StreamMode,
     ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError>
     where
@@ -180,16 +183,20 @@ where
         UpdateT: Into<StateValue> + Send + 'static,
         ContextT: Default + Send + Sync + 'static,
     {
-        Arc::clone(&self.pregel).stream_with_mode(input, stream_mode)
+        Arc::clone(&self.pregel).stream_with_mode(input, runtime_context, stream_mode)
     }
 
-    pub fn invoke(&self, input: Option<StateValue>) -> Result<StateValue, GraphError>
+    pub fn invoke(
+        &self,
+        input: Option<StateValue>,
+        runtime_context: RuntimeContext<ContextT>,
+    ) -> Result<StateValue, GraphError>
     where
         StateT: From<StateValue> + Send + 'static,
         UpdateT: Into<StateValue> + Send + 'static,
         ContextT: Default + Send + Sync + 'static,
     {
-        Arc::clone(&self.pregel).invoke(input)
+        Arc::clone(&self.pregel).invoke(input, runtime_context)
     }
 
     fn branch_trigger_channel(target: &str) -> String {

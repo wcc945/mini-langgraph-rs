@@ -364,7 +364,7 @@ mod tests {
             )]))
         );
 
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
         let output = (task.bound)(&task.input, &context).unwrap();
         assert!(matches!(output, NodeOutput::Update(_)));
     }
@@ -606,7 +606,7 @@ mod tests {
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
 
         let task = PregelTaskManager::execute_task_inner(task, &context).unwrap();
 
@@ -664,7 +664,7 @@ mod tests {
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let context = RuntimeContext { context: 2 };
+        let context = RuntimeContext::new(2);
 
         let task = PregelTaskManager::execute_task_inner(task, &context).unwrap();
 
@@ -696,7 +696,7 @@ mod tests {
             .unwrap();
         task.writes
             .push(("old".to_string(), StateValue::String("kept".to_string())));
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
 
         let task = PregelTaskManager::execute_task_inner(task, &context).unwrap();
 
@@ -740,7 +740,7 @@ mod tests {
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
 
         let task = PregelTaskManager::execute_task_inner(task, &context).unwrap();
 
@@ -769,7 +769,7 @@ mod tests {
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
 
         let error = match PregelTaskManager::execute_task_inner(task, &context) {
             Ok(_) => panic!("execute_task should reject command outputs"),
@@ -798,7 +798,7 @@ mod tests {
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
 
         let error = match PregelTaskManager::execute_task_inner(task, &context) {
             Ok(_) => panic!("execute_task should wrap bound errors"),
@@ -834,7 +834,7 @@ mod tests {
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
 
         let error = match PregelTaskManager::execute_task_inner(task, &context) {
             Ok(_) => panic!("execute_task should propagate writer errors"),
@@ -849,7 +849,7 @@ mod tests {
     #[test]
     fn execute_pending_tasks_returns_empty_without_tasks() {
         let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
 
         let writes = manager.execute_pending_tasks(&context).unwrap();
 
@@ -892,7 +892,7 @@ mod tests {
                 .unwrap();
             assert_eq!(tasks.len(), 2);
         }
-        let context = RuntimeContext { context: () };
+        let context = RuntimeContext::new(());
 
         let writes = manager.execute_pending_tasks(&context).unwrap();
 

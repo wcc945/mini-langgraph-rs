@@ -7,6 +7,7 @@ use crate::managed::ManagedValueSpec;
 use crate::pregel::consts::{DEFAULT_NAME, DEFAULT_RECURSION_LIMIT};
 use crate::pregel::loops::PregelLoop;
 use crate::pregel::node::PregelNode;
+use crate::runtime::RuntimeContext;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,28 +178,37 @@ where
     pub(crate) fn stream(
         self: Arc<Self>,
         input: Option<StateValue>,
+        runtime_context: RuntimeContext<ContextT>,
     ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError> {
-        let stream_mode = self.stream_mode;
-        self.stream_with_mode(input, stream_mode)
+        self.stream_with_context(input, runtime_context)
     }
 
     pub(crate) fn stream_with_mode(
         self: Arc<Self>,
         input: Option<StateValue>,
+        mut runtime_context: RuntimeContext<ContextT>,
         stream_mode: StreamMode,
+    ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError> {
+        runtime_context.stream_mode = Some(stream_mode);
+        self.stream_with_context(input, runtime_context)
+    }
+
+    fn stream_with_context(
+        self: Arc<Self>,
+        input: Option<StateValue>,
+        runtime_context: RuntimeContext<ContextT>,
     ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError> {
         let (sender, receiver) = mpsc::channel(16);
 
         tokio::spawn(async move {
             let new_error_sender = sender.clone();
-            let mut loop_state =
-                match PregelLoop::new_with_stream_mode(&self, input, stream_mode, sender) {
-                    Ok(loop_state) => loop_state,
-                    Err(error) => {
-                        let _ = new_error_sender.send(Err(error)).await;
-                        return;
-                    }
-                };
+            let mut loop_state = match PregelLoop::new(&self, input, runtime_context, sender) {
+                Ok(loop_state) => loop_state,
+                Err(error) => {
+                    let _ = new_error_sender.send(Err(error)).await;
+                    return;
+                }
+            };
 
             if let Err(error) = loop_state.enter() {
                 let _ = loop_state.stream_sender.send(Err(error)).await;
@@ -240,9 +250,10 @@ where
     pub(crate) fn invoke(
         self: Arc<Self>,
         input: Option<StateValue>,
+        runtime_context: RuntimeContext<ContextT>,
     ) -> Result<StateValue, GraphError> {
         let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&self, input, sender)?;
+        let mut loop_state = PregelLoop::new(&self, input, runtime_context, sender)?;
 
         loop_state.enter()?;
 
@@ -507,7 +518,10 @@ mod tests {
     async fn stream_sends_values_items() {
         let pregel = Arc::new(stream_pregel());
         let mut receiver = pregel
-            .stream(Some(StateValue::String("start".to_string())))
+            .stream(
+                Some(StateValue::String("start".to_string())),
+                RuntimeContext::default(),
+            )
             .unwrap();
 
         let item = receiver.recv().await.unwrap().unwrap();
@@ -523,7 +537,10 @@ mod tests {
         let mut pregel = stream_pregel();
         pregel.stream_mode = StreamMode::Updates;
         let mut receiver = Arc::new(pregel)
-            .stream(Some(StateValue::String("start".to_string())))
+            .stream(
+                Some(StateValue::String("start".to_string())),
+                RuntimeContext::default(),
+            )
             .unwrap();
 
         let item = receiver.recv().await.unwrap().unwrap();
@@ -546,6 +563,7 @@ mod tests {
         let mut receiver = pregel
             .stream_with_mode(
                 Some(StateValue::String("start".to_string())),
+                RuntimeContext::default(),
                 StreamMode::Updates,
             )
             .unwrap();
@@ -564,12 +582,36 @@ mod tests {
         assert!(receiver.recv().await.is_none());
     }
 
+    #[tokio::test]
+    async fn stream_uses_runtime_context_stream_mode() {
+        let pregel = Arc::new(stream_pregel());
+        let context = RuntimeContext::new(()).with_stream_mode(StreamMode::Updates);
+        let mut receiver = pregel
+            .stream(Some(StateValue::String("start".to_string())), context)
+            .unwrap();
+
+        let item = receiver.recv().await.unwrap().unwrap();
+
+        assert_eq!(item.step, 1);
+        assert_eq!(item.mode, StreamMode::Updates);
+        assert_eq!(
+            item.data,
+            StateValue::Object(HashMap::from([(
+                "b".to_string(),
+                StateValue::String("a".to_string())
+            )]))
+        );
+    }
+
     #[test]
     fn invoke_runs_to_completion_and_returns_final_output() {
         let pregel = Arc::new(stream_pregel());
 
         let output = pregel
-            .invoke(Some(StateValue::String("start".to_string())))
+            .invoke(
+                Some(StateValue::String("start".to_string())),
+                RuntimeContext::default(),
+            )
             .unwrap();
 
         assert_eq!(output, StateValue::String("a".to_string()));
@@ -579,7 +621,7 @@ mod tests {
     fn invoke_propagates_enter_error() {
         let pregel = Arc::new(stream_pregel());
 
-        let error = pregel.invoke(None).unwrap_err();
+        let error = pregel.invoke(None, RuntimeContext::default()).unwrap_err();
 
         assert!(
             matches!(error, GraphError::EmptyPregelInput(channels) if channels == vec!["input"])
@@ -609,7 +651,10 @@ mod tests {
         );
 
         let error = pregel
-            .invoke(Some(StateValue::String("start".to_string())))
+            .invoke(
+                Some(StateValue::String("start".to_string())),
+                RuntimeContext::default(),
+            )
             .unwrap_err();
 
         assert!(matches!(
@@ -641,7 +686,10 @@ mod tests {
         pregel.recursion_limit = 1;
 
         let error = Arc::new(pregel)
-            .invoke(Some(StateValue::String("start".to_string())))
+            .invoke(
+                Some(StateValue::String("start".to_string())),
+                RuntimeContext::default(),
+            )
             .unwrap_err();
 
         assert!(matches!(error, GraphError::PregelRecursionLimitReached(1)));
@@ -682,7 +730,10 @@ mod tests {
         );
 
         let error = pregel
-            .invoke(Some(StateValue::String("start".to_string())))
+            .invoke(
+                Some(StateValue::String("start".to_string())),
+                RuntimeContext::default(),
+            )
             .unwrap_err();
 
         assert!(matches!(
@@ -694,7 +745,7 @@ mod tests {
     #[tokio::test]
     async fn stream_sends_enter_error_for_empty_input() {
         let pregel = Arc::new(stream_pregel());
-        let mut receiver = pregel.stream(None).unwrap();
+        let mut receiver = pregel.stream(None, RuntimeContext::default()).unwrap();
 
         let error = receiver.recv().await.unwrap().unwrap_err();
 
