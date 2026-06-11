@@ -12,7 +12,7 @@ pub enum NodeOutput<UpdateT> {
 }
 
 pub type NodeFn<StateT, UpdateT, ContextT> = Box<
-    dyn Fn(&StateT, &mut RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>
+    dyn Fn(&StateT, &RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>
         + Send
         + Sync
         + 'static,
@@ -34,17 +34,14 @@ mod tests {
 
     #[test]
     fn state_node_spec_stores_and_runs_node_function() {
-        let spec = StateNodeSpec::new(Box::new(
-            |state: &i32, context: &mut RuntimeContext<i32>| {
-                context.context += 1;
-                Ok(NodeOutput::Update(*state + context.context))
-            },
-        ));
-        let mut context = RuntimeContext { context: 2 };
+        let spec = StateNodeSpec::new(Box::new(|state: &i32, context: &RuntimeContext<i32>| {
+            Ok(NodeOutput::Update(*state + context.context))
+        }));
+        let context = RuntimeContext { context: 2 };
 
-        let output = (spec.runnable)(&5, &mut context).unwrap();
+        let output = (spec.runnable)(&5, &context).unwrap();
 
-        assert_eq!(context.context, 3);
-        assert!(matches!(output, NodeOutput::Update(8)));
+        assert_eq!(context.context, 2);
+        assert!(matches!(output, NodeOutput::Update(7)));
     }
 }

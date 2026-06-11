@@ -6,6 +6,7 @@ use crate::managed::ManagedValueSpec;
 use crate::pregel::node::PregelNode;
 use crate::pregel::pregel::{Pregel, PregelStreamItem, StreamMode};
 use crate::pregel::task::{PregelTaskManager, PregelTaskWrites};
+use crate::runtime::RuntimeContext;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,8 +39,9 @@ pub(crate) struct PregelLoop<'a, StateT, UpdateT, ContextT> {
     pub(crate) updated_channels: Option<HashSet<String>>,
     pub(crate) output: Option<StateValue>,
     pub(crate) stream_sender: mpsc::Sender<Result<PregelStreamItem, GraphError>>,
-    pending_writes: Vec<(String, StateValue)>,
+    pending_writes: Vec<PregelTaskWrites>,
     task_updates: HashMap<String, StateValue>,
+    runtime_context: RuntimeContext<ContextT>,
 }
 
 impl<'a, StateT, UpdateT, ContextT> PregelLoop<'a, StateT, UpdateT, ContextT>
@@ -79,6 +81,9 @@ where
             stream_sender,
             pending_writes: Vec::new(),
             task_updates: HashMap::new(),
+            runtime_context: RuntimeContext {
+                context: ContextT::default(),
+            },
         })
     }
 
@@ -226,7 +231,16 @@ where
         Ok(false)
     }
 
-    pub(crate) fn execute(&mut self) -> Result<(), GraphError> {
+    pub(crate) fn execute(&mut self) -> Result<(), GraphError>
+    where
+        StateT: Send,
+        UpdateT: Send,
+        ContextT: Sync,
+    {
+        self.pending_writes = self
+            .task_manager
+            .execute_pending_tasks(&self.runtime_context)?;
+
         Ok(())
     }
 
@@ -246,6 +260,9 @@ mod tests {
     use super::*;
     use crate::channel::BaseChannel;
     use crate::channel::binop::BinaryOperatorAggregate;
+    use crate::channel::channel_writer::{
+        ChannelWriteEntry, ChannelWriteValue, ChannelWriter, ChannelWriterEntry,
+    };
     use crate::channel::ephemeral_value::EphemeralValue;
     use crate::channel::last_value::LastValue;
     use crate::channel::named_barrier_value::NamedBarrierValue;
@@ -412,6 +429,15 @@ mod tests {
         )
     }
 
+    fn fixed_writer(channel: &str, value: StateValue) -> ChannelWriter<StateValue, ()> {
+        ChannelWriter::new(vec![ChannelWriterEntry::Channel(ChannelWriteEntry {
+            channel: channel.to_string(),
+            value: ChannelWriteValue::Value(value),
+            skip_none: false,
+            mapper: None,
+        })])
+    }
+
     #[test]
     fn executable_task_projects_to_task_writes() {
         let node = noop_node();
@@ -446,7 +472,7 @@ mod tests {
                     vec!["input".to_string()],
                     None,
                     Vec::new(),
-                    Box::new(|_, _| Ok(NodeOutput::None)),
+                    Box::new(|_, _| Ok(NodeOutput::<StateValue>::None)),
                 ),
             )]),
             HashMap::from([
@@ -807,5 +833,67 @@ mod tests {
             loop_state.channels.get("finish").unwrap().get().unwrap(),
             StateValue::String("done".to_string())
         );
+    }
+
+    #[test]
+    fn execute_runs_prepared_tasks_and_keeps_writes_pending() {
+        let pregel = Pregel::new(
+            HashMap::from([(
+                "a".to_string(),
+                PregelNode::new(
+                    vec!["input".to_string()],
+                    vec!["input".to_string()],
+                    None,
+                    vec![fixed_writer(
+                        "output",
+                        StateValue::String("done".to_string()),
+                    )],
+                    Box::new(|_, _| Ok(NodeOutput::<StateValue>::None)),
+                ),
+            )]),
+            HashMap::from([
+                ("input".to_string(), channel()),
+                ("output".to_string(), channel()),
+            ]),
+            HashMap::new(),
+            vec!["input".to_string()],
+            vec!["output".to_string()],
+        )
+        .unwrap();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut loop_state = PregelLoop::new(
+            &pregel,
+            Some(StateValue::String("start".to_string())),
+            sender,
+        )
+        .unwrap();
+        loop_state.enter().unwrap();
+        {
+            let tasks = loop_state
+                .task_manager
+                .prepare_tasks(
+                    loop_state.nodes,
+                    &loop_state.channels,
+                    &loop_state.managed,
+                    loop_state.trigger_to_nodes,
+                    loop_state.updated_channels.as_ref(),
+                    loop_state.step,
+                )
+                .unwrap();
+            assert_eq!(tasks.len(), 1);
+        }
+
+        loop_state.execute().unwrap();
+
+        assert_eq!(loop_state.pending_writes.len(), 1);
+        assert_eq!(loop_state.pending_writes[0].name, "a");
+        assert_eq!(
+            loop_state.pending_writes[0].writes,
+            vec![("output".to_string(), StateValue::String("done".to_string()))]
+        );
+        assert!(matches!(
+            loop_state.channels.get("output").unwrap().get(),
+            Err(GraphError::EmptyChannel)
+        ));
     }
 }

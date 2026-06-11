@@ -26,12 +26,12 @@
 
 ## 当前代码状态
 
-- `src/runtime/mod.rs` 已开始定义 `RuntimeContext<ContextT>`，当前只包含用户运行上下文 `context: ContextT`。
-- 节点函数签名已经预留 `&mut RuntimeContext<ContextT>` 参数，用于后续承载 runtime、config、writer、store、执行元数据等运行时信息。
+- `src/runtime/mod.rs` 已开始定义 `RuntimeContext<ContextT>`，当前只包含用户运行上下文 `context: ContextT`。该上下文按源项目 `Runtime.context` 的定位作为运行期只读依赖视图使用，图状态修改必须通过节点输出和 channel writes 表达。
+- 节点函数签名已经预留 `&RuntimeContext<ContextT>` 参数，用于后续承载 runtime、config、writer、store、执行元数据等运行时信息；当前不提供隐式可变共享上下文。
 - `src/pregel/node.rs` 已实现 `PregelNode` MVP，作为后续组装可执行 task 的运行时节点容器；当前保存输入 `channels: Vec<String>`、触发 `triggers`、可选输入 `mapper`、输出 `writers` 和主逻辑 `bound`。
 - `PregelNodeBound<StateT, UpdateT, ContextT>` 的节点主逻辑签名对齐 `graph::node::NodeFn`，返回 `NodeOutput<UpdateT>`；当前不预置源项目 `DEFAULT_BOUND` 等默认执行逻辑。
-- `src/pregel/task.rs` 已保留任务结构边界：`PregelExecutableTask` 保存任务名、输入、待执行 `bound` 引用、pending writes、writers 引用、triggers、id 和 path；`PregelTaskWrites` 对齐源项目传给 `apply_writes` 的轻量写入批次，只保存 `name`、`writes`、`triggers` 和 `path`。`PregelTaskManager::submit_task` 会按 task id 暂存任务，`prepare_task` / `prepare_tasks` 已实现源项目 PULL 任务准备主线：根据可用 trigger channel 选择节点，读取普通 channel 输入，应用节点 mapper，并生成待执行任务。`execute_task` 已实现单任务执行原语：先执行 `bound`，再把节点输出按顺序交给 writers 的 `assemble`，将产生的 writes 追加到 task pending writes。
-- `src/pregel/loops.rs` 已保留最小同步 Pregel loop 构造边界。`PregelLoop::new` 会从 `Pregel.channels` 和 `Pregel.managed` 通过 `copy_box()` 复制出本次运行专用 channel map 与 managed map；nodes、input/output/stream channels、stream mode、trigger 索引和 name 等图规格字段在 loop 中使用引用。`PregelLoop::enter` 对齐源项目 `SyncPregelLoop.__enter__` 的进入边界，并调用 `first` 执行 fresh input 的最小初始化：`enter` 将 `self.input_channels` 传给 `first(input_channels)`；`first` 把初始输入映射为 input writes，构造无 triggers 的 `PregelTaskWrites` 并直接调用 `apply_writes` 应用到 input channel，记录 `updated_channels`，再将状态切到 `Pending`。`tick`、`execute`、`after_tick` 和 `is_stream_closed` 当前暂不实现真实调度、执行、更新或发送逻辑。
+- `src/pregel/task.rs` 已保留任务结构边界：`PregelExecutableTask` 保存任务名、输入、待执行 `bound` 引用、pending writes、writers 引用、triggers、id 和 path；`PregelTaskWrites` 对齐源项目传给 `apply_writes` 的轻量写入批次，只保存 `name`、`writes`、`triggers` 和 `path`。`PregelTaskManager::submit_task` 会按 task id 暂存任务，`prepare_task` / `prepare_tasks` 已实现源项目 PULL 任务准备主线：根据可用 trigger channel 选择节点，读取普通 channel 输入，应用节点 mapper，并生成待执行任务。单任务执行逻辑收敛在内部 helper 中：先执行 `bound`，再把节点输出按顺序交给 writers 的 `assemble`，将产生的 writes 追加到 task pending writes。`execute_pending_tasks` 是当前 MVP 的批量执行入口：空任务直接返回，单任务走同步 fast path，多任务使用 scoped threads 并发执行并按稳定顺序返回 `PregelTaskWrites`。
+- `src/pregel/loops.rs` 已保留最小同步 Pregel loop 构造边界。`PregelLoop::new` 会从 `Pregel.channels` 和 `Pregel.managed` 通过 `copy_box()` 复制出本次运行专用 channel map 与 managed map；nodes、input/output/stream channels、stream mode、trigger 索引和 name 等图规格字段在 loop 中使用引用。`PregelLoop::enter` 对齐源项目 `SyncPregelLoop.__enter__` 的进入边界，并调用 `first` 执行 fresh input 的最小初始化：`enter` 将 `self.input_channels` 传给 `first(input_channels)`；`first` 把初始输入映射为 input writes，构造无 triggers 的 `PregelTaskWrites` 并直接调用 `apply_writes` 应用到 input channel，记录 `updated_channels`，再将状态切到 `Pending`。`execute` 已接入当前 superstep 已准备任务的执行和 pending writes 收集；`tick`、`after_tick` 和 `is_stream_closed` 当前暂不实现真实调度、更新或发送逻辑。
 - `src/pregel/pregel.rs` 已实现 `Pregel` MVP 容器，保存 `nodes`、`channels`、`managed`、`input_channels`、`output_channels`、`stream_channels`、`stream_mode`、`recursion_limit`、`trigger_to_nodes` 和 `name`。
 - `Pregel::validate` 已实现源项目 `validate_graph` 的最小 Rust 版校验：检查节点读取 channel、trigger channel、input/output/stream channel 是否存在，要求至少一个 input channel 被节点订阅，并重建 `trigger_to_nodes`。
 - `CompiledStateGraph` 已能由 `StateGraph::compile()` 生成，并持有可校验的 `Pregel` 容器；当前已提供 `stream` 转发到内部 `Pregel::stream`，但仍未实现 `invoke`。
@@ -45,8 +45,8 @@
 ## 当前未完成
 
 - `invoke` 尚未实现；`stream()` 当前只暴露管道和 loop 构造边界，尚未提供同步 Pregel 主循环的真实执行结果。
-- `PregelLoop::execute` 尚未接入任务批量执行或并发调度；当前只能在 task manager 层单独执行已准备好的 task。
-- `PregelLoop::after_tick` 尚未调用 `apply_writes` 汇总 task writes；因此 Update 阶段原语已可单测，但完整 stream/invoke 主循环仍未贯通。
+- `PregelLoop::tick` 尚未接入任务准备，因此完整 `stream()` 主循环仍不能端到端执行图。
+- `PregelLoop::after_tick` 尚未调用 `apply_writes` 汇总 task writes；因此 Update 阶段原语和 Execution 阶段原语已可单测，但完整 stream/invoke 主循环仍未贯通。
 - `first(input_channels)` 当前只支持 fresh input 初始化，并已对齐源项目 `_first(input_keys=...)` 的显式 input channel 参数和 fresh input 路径调用写入应用原语；但源项目 `_first` 中的 discard tasks、checkpoint 恢复、resume、Command 输入、time travel、delta channel 持久化和 interrupt 传播仍未迁移。因此 `None` 输入会作为空输入错误返回，而不是被解释为 resume。
 - `PregelNode.channels` 已由 `CompiledStateGraph::attach_node` 填入所有 state channel 和 managed value；`prepare_task` 会把可用普通 channel 组装为 `StateValue::Object` 并调用节点 mapper。managed value 当前只有 `copy_box()`，尚无 `get()` 读取能力，因此任务输入暂不注入 managed value。
 - `NodeOutput::Command` 的运行时解释尚未实现。

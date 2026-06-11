@@ -172,7 +172,7 @@ impl<StateT, UpdateT, ContextT> Pregel<StateT, UpdateT, ContextT>
 where
     StateT: From<crate::channel::StateValue> + Send + 'static,
     UpdateT: Into<crate::channel::StateValue> + Send + 'static,
-    ContextT: Default + Send + 'static,
+    ContextT: Default + Send + Sync + 'static,
 {
     pub(crate) fn stream(
         self: Arc<Self>,

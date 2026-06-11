@@ -37,7 +37,7 @@
 - 构图 API 和 `validate` 已统一返回 `GraphError`，避免使用散落的字符串错误；`GraphError` 当前包含重复节点、保留节点名、未知节点、非法边端点、重复分支、缺少入口和未知分支目标等构图错误。
 - 已为核心构图模块补充单元测试，覆盖 `BranchSpec::resolve`、`WaitingEdgeSpec` 起点归一化、`StateNodeSpec` runnable 保存和执行、`StateGraph` builder 成功路径、错误路径与 `validate` 校验。
 - `StateGraph` 已实现 `new()`，用于创建空 builder；暂不接收 Python 版 `state_schema/context_schema/input_schema/output_schema` 参数。
-- `src/graph/node.rs` 已开始定义节点执行层骨架：`NodeFn<NodeInputT, UpdateT, ContextT>` 使用统一签名 `(&NodeInputT, &mut RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>`。
+- `src/graph/node.rs` 已开始定义节点执行层骨架：`NodeFn<NodeInputT, UpdateT, ContextT>` 使用统一签名 `(&NodeInputT, &RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>`，其中 `RuntimeContext` 按运行依赖只读视图处理。
 - `NodeOutput<UpdateT>` 当前设计为支持普通 `Update(UpdateT)`、`Command(Command<UpdateT>)`、多个 `Commands(Vec<Command<UpdateT>>)` 和 `None`。
 - `StateNodeSpec<NodeInputT, UpdateT, ContextT>` 当前仅保存 `runnable`，暂不包含源项目中的 `metadata`、`input_schema`、`retry_policy`、`cache_policy`、`timeout` 等策略字段。
 - `src/graph/waiting_edge.rs` 已新增 `WaitingEdgeSpec`，用于表示多起点 join 边；构造时会对 `starts` 排序并去重，使 `a,b -> c` 与 `b,a -> c` 归一为同一条 join 边。

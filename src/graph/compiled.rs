@@ -165,7 +165,7 @@ where
     where
         StateT: From<StateValue> + Send + 'static,
         UpdateT: Into<StateValue> + Send + 'static,
-        ContextT: Default + Send + 'static,
+        ContextT: Default + Send + Sync + 'static,
     {
         Arc::clone(&self.pregel).stream(input)
     }

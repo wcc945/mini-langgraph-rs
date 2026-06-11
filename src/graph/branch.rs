@@ -9,7 +9,7 @@ pub enum BranchOutput {
 }
 
 pub type BranchPathFn<StateT, ContextT> =
-    Box<dyn Fn(&StateT, &mut RuntimeContext<ContextT>) -> Option<String> + Send + Sync + 'static>;
+    Box<dyn Fn(&StateT, &RuntimeContext<ContextT>) -> Option<String> + Send + Sync + 'static>;
 
 pub struct BranchSpec<StateT, ContextT> {
     pub path: BranchPathFn<StateT, ContextT>,

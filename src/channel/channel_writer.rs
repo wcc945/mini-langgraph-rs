@@ -38,7 +38,7 @@ pub(crate) type ChannelTupleMapper = Box<
 >;
 
 pub(crate) type ChannelExecutable<StateT, ContextT> = Box<
-    dyn Fn(&StateT, &mut RuntimeContext<ContextT>) -> Result<Vec<ChannelWriteEntry>, GraphError>
+    dyn Fn(&StateT, &RuntimeContext<ContextT>) -> Result<Vec<ChannelWriteEntry>, GraphError>
         + Send
         + Sync
         + 'static,
@@ -58,7 +58,7 @@ impl<StateT, ContextT> ChannelWriter<StateT, ContextT> {
         output: &StateValue,
         allow_passthrough: bool,
         state: &StateT,
-        context: &mut RuntimeContext<ContextT>,
+        context: &RuntimeContext<ContextT>,
     ) -> Result<Vec<(String, StateValue)>, GraphError> {
         let mut writes = Vec::new();
 
@@ -217,8 +217,8 @@ mod tests {
         output: StateValue,
         allow_passthrough: bool,
     ) -> Result<Vec<(String, StateValue)>, GraphError> {
-        let mut context = RuntimeContext { context: () };
-        writer.assemble(&output, allow_passthrough, &(), &mut context)
+        let context = RuntimeContext { context: () };
+        writer.assemble(&output, allow_passthrough, &(), &context)
     }
 
     #[test]
@@ -377,20 +377,21 @@ mod tests {
     #[test]
     fn assemble_executable_entry_can_emit_channel_entries() {
         let writer = ChannelWriter::new(vec![ChannelWriterEntry::Executable(Box::new(
-            |state: &i64, context: &mut RuntimeContext<i64>| {
-                context.context += *state;
+            |state: &i64, context: &RuntimeContext<i64>| {
                 Ok(vec![ChannelWriteEntry {
                     channel: "routed".to_string(),
-                    value: ChannelWriteValue::Value(StateValue::Number(context.context as f64)),
+                    value: ChannelWriteValue::Value(StateValue::Number(
+                        (context.context + *state) as f64,
+                    )),
                     skip_none: false,
                     mapper: None,
                 }])
             },
         ))]);
-        let mut context = RuntimeContext { context: 2 };
+        let context = RuntimeContext { context: 2 };
 
         let writes = writer
-            .assemble(&StateValue::Null, false, &3, &mut context)
+            .assemble(&StateValue::Null, false, &3, &context)
             .unwrap();
 
         assert_eq!(

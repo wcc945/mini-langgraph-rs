@@ -8,7 +8,7 @@ pub(crate) type PregelNodeMapper<StateT> =
     Box<dyn Fn(StateValue) -> Result<StateT, GraphError> + Send + Sync + 'static>;
 
 pub(crate) type PregelNodeBound<StateT, UpdateT, ContextT> = Box<
-    dyn Fn(&StateT, &mut RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>
+    dyn Fn(&StateT, &RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>
         + Send
         + Sync
         + 'static,
@@ -63,16 +63,13 @@ mod tests {
             vec!["trigger".to_string()],
             Some(Box::new(|_| Ok(2))),
             vec![writer("output")],
-            Box::new(|input, context| {
-                context.context += *input;
-                Ok(NodeOutput::Update(input + context.context))
-            }),
+            Box::new(|input, context| Ok(NodeOutput::Update(input + context.context))),
         );
-        let mut context = RuntimeContext { context: 3 };
+        let context = RuntimeContext { context: 3 };
         let mapped = node.mapper.as_ref().unwrap()(StateValue::Null).unwrap();
-        let output = (node.bound)(&mapped, &mut context).unwrap();
+        let output = (node.bound)(&mapped, &context).unwrap();
         let writes = node.writers[0]
-            .assemble(&StateValue::Number(1.0), true, &mapped, &mut context)
+            .assemble(&StateValue::Number(1.0), true, &mapped, &context)
             .unwrap();
 
         assert_eq!(node.channels, vec!["input".to_string()]);
@@ -82,8 +79,8 @@ mod tests {
             writes,
             vec![("output".to_string(), StateValue::Number(1.0))]
         );
-        assert_eq!(context.context, 5);
-        assert!(matches!(output, NodeOutput::Update(7)));
+        assert_eq!(context.context, 3);
+        assert!(matches!(output, NodeOutput::Update(5)));
     }
 
     #[test]
@@ -100,10 +97,10 @@ mod tests {
             Vec::new(),
             Box::new(|input, _| Ok(NodeOutput::Update(input * 2))),
         );
-        let mut context = RuntimeContext { context: () };
+        let context = RuntimeContext { context: () };
 
         let mapped = node.mapper.as_ref().unwrap()(StateValue::Number(2.0)).unwrap();
-        let output = (node.bound)(&mapped, &mut context).unwrap();
+        let output = (node.bound)(&mapped, &context).unwrap();
 
         assert!(matches!(output, NodeOutput::Update(6)));
     }

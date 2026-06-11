@@ -132,10 +132,66 @@ where
         }))
     }
 
-    pub(crate) fn execute_task(
+    pub(crate) fn execute_pending_tasks(
         &mut self,
+        context: &RuntimeContext<ContextT>,
+    ) -> Result<Vec<PregelTaskWrites>, GraphError>
+    where
+        StateT: Send,
+        UpdateT: Into<StateValue> + Send,
+        ContextT: Sync,
+    {
+        let mut tasks = std::mem::take(&mut self.tasks)
+            .into_values()
+            .collect::<Vec<_>>();
+        tasks.sort_by(|left, right| left.path.cmp(&right.path).then(left.id.cmp(&right.id)));
+
+        let executed_tasks = match tasks.len() {
+            0 => Vec::new(),
+            1 => vec![Self::execute_task_inner(tasks.remove(0), context)?],
+            _ => std::thread::scope(|scope| {
+                let handles = tasks
+                    .into_iter()
+                    .map(|task| {
+                        let name = task.name.clone();
+                        let handle = scope.spawn(move || Self::execute_task_inner(task, context));
+                        (name, handle)
+                    })
+                    .collect::<Vec<_>>();
+                let mut executed_tasks = Vec::new();
+
+                for (name, handle) in handles {
+                    let task = match handle.join() {
+                        Ok(result) => result?,
+                        Err(_) => {
+                            return Err(GraphError::PregelTaskFailed {
+                                node: name,
+                                message: "task panicked".to_string(),
+                            });
+                        }
+                    };
+                    executed_tasks.push(task);
+                }
+
+                Ok(executed_tasks)
+            })?,
+        };
+
+        let writes = executed_tasks
+            .iter()
+            .map(PregelExecutableTask::to_writes)
+            .collect::<Vec<_>>();
+        self.tasks = executed_tasks
+            .into_iter()
+            .map(|task| (task.id.clone(), task))
+            .collect();
+
+        Ok(writes)
+    }
+
+    fn execute_task_inner(
         mut task: PregelExecutableTask<'a, StateT, UpdateT, ContextT>,
-        context: &mut RuntimeContext<ContextT>,
+        context: &RuntimeContext<ContextT>,
     ) -> Result<PregelExecutableTask<'a, StateT, UpdateT, ContextT>, GraphError>
     where
         UpdateT: Into<StateValue>,
@@ -299,8 +355,8 @@ mod tests {
             )]))
         );
 
-        let mut context = RuntimeContext { context: () };
-        let output = (task.bound)(&task.input, &mut context).unwrap();
+        let context = RuntimeContext { context: () };
+        let output = (task.bound)(&task.input, &context).unwrap();
         assert!(matches!(output, NodeOutput::Update(_)));
     }
 
@@ -536,14 +592,14 @@ mod tests {
             ("input".to_string(), last_value(Some(StateValue::Null))),
             ("trigger".to_string(), trigger(true)),
         ]);
-        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let task = manager
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let mut context = RuntimeContext { context: () };
+        let context = RuntimeContext { context: () };
 
-        let task = manager.execute_task(task, &mut context).unwrap();
+        let task = PregelTaskManager::execute_task_inner(task, &context).unwrap();
 
         assert_eq!(
             task.writes,
@@ -557,7 +613,7 @@ mod tests {
     #[test]
     fn execute_task_passes_task_input_and_context_to_executable_writer() {
         let writer = ChannelWriter::new(vec![ChannelWriterEntry::Executable(Box::new(
-            |state: &StateValue, context: &mut RuntimeContext<i64>| {
+            |state: &StateValue, context: &RuntimeContext<i64>| {
                 let StateValue::Object(values) = state else {
                     return Err(GraphError::InvalidPregelInput(format!(
                         "expected object input, got {state:?}"
@@ -569,10 +625,11 @@ mod tests {
                     ));
                 };
 
-                context.context += *seed as i64;
                 Ok(vec![ChannelWriteEntry {
                     channel: "seen".to_string(),
-                    value: ChannelWriteValue::Value(StateValue::Number(context.context as f64)),
+                    value: ChannelWriteValue::Value(StateValue::Number(
+                        (context.context + *seed as i64) as f64,
+                    )),
                     skip_none: false,
                     mapper: None,
                 }])
@@ -583,10 +640,7 @@ mod tests {
             vec!["trigger".to_string()],
             None,
             vec![writer],
-            Box::new(|_, context| {
-                context.context += 1;
-                Ok(NodeOutput::None)
-            }),
+            Box::new(|_, _| Ok(NodeOutput::None)),
         );
         let nodes = HashMap::from([("a".to_string(), node)]);
         let channels = HashMap::from([
@@ -596,19 +650,19 @@ mod tests {
             ),
             ("trigger".to_string(), trigger(true)),
         ]);
-        let mut manager = PregelTaskManager::<StateValue, StateValue, i64>::new();
+        let manager = PregelTaskManager::<StateValue, StateValue, i64>::new();
         let task = manager
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let mut context = RuntimeContext { context: 2 };
+        let context = RuntimeContext { context: 2 };
 
-        let task = manager.execute_task(task, &mut context).unwrap();
+        let task = PregelTaskManager::execute_task_inner(task, &context).unwrap();
 
-        assert_eq!(context.context, 7);
+        assert_eq!(context.context, 2);
         assert_eq!(
             task.writes,
-            vec![("seen".to_string(), StateValue::Number(7.0))]
+            vec![("seen".to_string(), StateValue::Number(6.0))]
         );
     }
 
@@ -626,16 +680,16 @@ mod tests {
             ("input".to_string(), last_value(Some(StateValue::Null))),
             ("trigger".to_string(), trigger(true)),
         ]);
-        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let mut task = manager
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
         task.writes
             .push(("old".to_string(), StateValue::String("kept".to_string())));
-        let mut context = RuntimeContext { context: () };
+        let context = RuntimeContext { context: () };
 
-        let task = manager.execute_task(task, &mut context).unwrap();
+        let task = PregelTaskManager::execute_task_inner(task, &context).unwrap();
 
         assert_eq!(
             task.writes,
@@ -672,14 +726,14 @@ mod tests {
             ("input".to_string(), last_value(Some(StateValue::Null))),
             ("trigger".to_string(), trigger(true)),
         ]);
-        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let task = manager
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let mut context = RuntimeContext { context: () };
+        let context = RuntimeContext { context: () };
 
-        let task = manager.execute_task(task, &mut context).unwrap();
+        let task = PregelTaskManager::execute_task_inner(task, &context).unwrap();
 
         assert_eq!(
             task.writes,
@@ -701,14 +755,14 @@ mod tests {
             ("input".to_string(), last_value(Some(StateValue::Null))),
             ("trigger".to_string(), trigger(true)),
         ]);
-        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let task = manager
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let mut context = RuntimeContext { context: () };
+        let context = RuntimeContext { context: () };
 
-        let error = match manager.execute_task(task, &mut context) {
+        let error = match PregelTaskManager::execute_task_inner(task, &context) {
             Ok(_) => panic!("execute_task should reject command outputs"),
             Err(error) => error,
         };
@@ -730,14 +784,14 @@ mod tests {
             ("input".to_string(), last_value(Some(StateValue::Null))),
             ("trigger".to_string(), trigger(true)),
         ]);
-        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let task = manager
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let mut context = RuntimeContext { context: () };
+        let context = RuntimeContext { context: () };
 
-        let error = match manager.execute_task(task, &mut context) {
+        let error = match PregelTaskManager::execute_task_inner(task, &context) {
             Ok(_) => panic!("execute_task should wrap bound errors"),
             Err(error) => error,
         };
@@ -766,14 +820,14 @@ mod tests {
             ("input".to_string(), last_value(Some(StateValue::Null))),
             ("trigger".to_string(), trigger(true)),
         ]);
-        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let task = manager
             .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
             .unwrap()
             .unwrap();
-        let mut context = RuntimeContext { context: () };
+        let context = RuntimeContext { context: () };
 
-        let error = match manager.execute_task(task, &mut context) {
+        let error = match PregelTaskManager::execute_task_inner(task, &context) {
             Ok(_) => panic!("execute_task should propagate writer errors"),
             Err(error) => error,
         };
@@ -781,5 +835,75 @@ mod tests {
         assert!(
             matches!(error, GraphError::InvalidChannelUpdate(message) if message == "bad writer")
         );
+    }
+
+    #[test]
+    fn execute_pending_tasks_returns_empty_without_tasks() {
+        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let context = RuntimeContext { context: () };
+
+        let writes = manager.execute_pending_tasks(&context).unwrap();
+
+        assert!(writes.is_empty());
+        assert!(manager.tasks.is_empty());
+    }
+
+    #[test]
+    fn execute_pending_tasks_runs_tasks_and_returns_writes_in_stable_order() {
+        let nodes = HashMap::from([
+            (
+                "b".to_string(),
+                PregelNode::new(
+                    vec!["input".to_string()],
+                    vec!["trigger".to_string()],
+                    None,
+                    vec![fixed_writer("out", StateValue::String("b".to_string()))],
+                    Box::new(|_, _| Ok(NodeOutput::None)),
+                ),
+            ),
+            (
+                "a".to_string(),
+                PregelNode::new(
+                    vec!["input".to_string()],
+                    vec!["trigger".to_string()],
+                    None,
+                    vec![fixed_writer("out", StateValue::String("a".to_string()))],
+                    Box::new(|_, _| Ok(NodeOutput::None)),
+                ),
+            ),
+        ]);
+        let channels = HashMap::from([
+            ("input".to_string(), last_value(Some(StateValue::Null))),
+            ("trigger".to_string(), trigger(true)),
+        ]);
+        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        {
+            let tasks = manager
+                .prepare_tasks(&nodes, &channels, &HashMap::new(), &HashMap::new(), None, 0)
+                .unwrap();
+            assert_eq!(tasks.len(), 2);
+        }
+        let context = RuntimeContext { context: () };
+
+        let writes = manager.execute_pending_tasks(&context).unwrap();
+
+        assert_eq!(
+            writes
+                .iter()
+                .map(|writes| writes.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            writes
+                .iter()
+                .map(|writes| writes.writes.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                vec![("out".to_string(), StateValue::String("a".to_string()))],
+                vec![("out".to_string(), StateValue::String("b".to_string()))],
+            ]
+        );
+        assert_eq!(manager.tasks.len(), 2);
     }
 }

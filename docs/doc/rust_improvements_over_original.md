@@ -23,10 +23,10 @@ pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
 Rust 版当前采用统一节点函数类型：
 
 ```rust
-dyn Fn(&NodeInputT, &mut RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>
+dyn Fn(&NodeInputT, &RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>
 ```
 
-所有运行时依赖统一放入 `RuntimeContext<ContextT>`，避免在运行时识别函数参数。后续如果需要适配不使用 context 的闭包，可以在 `add_node` 层做轻量 adapter，而不是复制完整 `Runnable` 生态。
+所有运行时依赖统一放入 `RuntimeContext<ContextT>`，避免在运行时识别函数参数。该上下文按源项目 `Runtime.context` 的定位作为只读运行依赖视图，不作为节点之间共享可变状态；需要可变共享资源时由调用方显式放入线程安全类型。后续如果需要适配不使用 context 的闭包，可以在 `add_node` 层做轻量 adapter，而不是复制完整 `Runnable` 生态。
 
 ## 3. 区分局部更新和节点完整输出
 
@@ -302,7 +302,7 @@ pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
 
 源项目 `PregelLoop` / `SyncPregelLoop` 同时承载运行时核心状态和 checkpoint、cache、store、interrupt、debug stream、retry、async executor、生命周期事件等平台能力。Rust 版当前只实现同步 Pregel 主线需要的运行态，并把图规格与运行状态分开：`Pregel` 保存 nodes、channel 原型和配置，`PregelLoop` 持有本次运行复制出的 channels、step、pending writes、updated channels 和输出缓存。
 
-当前 `PregelLoop::new` 从 `Pregel.channels` 和 `Pregel.managed` 复制本次运行专用 map，不再借用或共享这两类运行态。`PregelLoop::enter` 对齐源项目 `SyncPregelLoop.__enter__` 的调用边界，并调用 Rust 版 `first` 执行 fresh input 初始化；`first` 只迁移源项目 `_first` 中“输入映射为 channel 写入并产生 `updated_channels`”的主线。`tick`、`execute`、`after_tick` 和 `is_stream_closed` 目前只保留接口形状，不实现真实调度、执行、更新或发送逻辑；后续补实现时应保持源项目语义：`tick` 只返回是否继续，`execute` 和 `after_tick` 不把 stream chunk 作为返回值暴露给外层，发送动作由 loop 持有的 sender 内部完成。
+当前 `PregelLoop::new` 从 `Pregel.channels` 和 `Pregel.managed` 复制本次运行专用 map，不再借用或共享这两类运行态。`PregelLoop::enter` 对齐源项目 `SyncPregelLoop.__enter__` 的调用边界，并调用 Rust 版 `first` 执行 fresh input 初始化；`first` 只迁移源项目 `_first` 中“输入映射为 channel 写入并产生 `updated_channels`”的主线。`execute` 已接入当前 superstep 已准备任务的执行和 pending writes 收集，并保持源项目“执行阶段只产出 writes，Update 阶段再应用 channel”的边界。`tick`、`after_tick` 和 `is_stream_closed` 目前仍只保留接口形状，不实现真实调度、更新或发送逻辑；后续补实现时应保持源项目语义：`tick` 只返回是否继续，`execute` 和 `after_tick` 不把 stream chunk 作为返回值暴露给外层，发送动作由 loop 持有的 sender 内部完成。
 
 源项目 `_first` 还处理 checkpoint、resume、Command、time travel、delta channel、interrupt 等路径。Rust 版当前没有这些运行时能力，因此 `first` 不写入 pending writes，也不把 `None` 输入解释为 resume；`None` 或无法映射到 input channel 的输入会返回明确错误。
 
@@ -326,13 +326,13 @@ Rust 版当前只实现 PULL 节点任务准备：`prepare_tasks` 根据 `update
 
 由于 Rust 版尚未实现 checkpoint 版本表，当前不复制源项目“channel version 大于 versions_seen 才触发”的完整语义，而是以 channel `is_available()` 作为可执行条件。`ManagedValueSpec` 目前只有 `copy_box()`，没有 scratchpad 相关 `get()`，因此 managed value 只作为合法读取项保留在 node channels 中，暂不注入任务输入。PUSH/Send、cache、retry、timeout、subgraph、interrupt/resume 和 Runnable config 仍暂缓。
 
-## 19. `execute_task` 先作为单任务执行原语
+## 19. `execute_pending_tasks` 迁移执行阶段主线
 
 源项目由 `PregelRunner` 并发调度 task，并通过 `run_with_retry` / `arun_with_retry` 执行节点 runnable；节点执行期间 writer 会把 writes 追加到 task，随后由 loop 的 apply/update 阶段统一更新 channel。
 
-Rust 版当前先把这条主线收敛为 `PregelTaskManager::execute_task`：调用 task 的 `bound` 得到 `NodeOutput`，把 `Update` 转成 `StateValue`、把 `None` 转成 `StateValue::Null`，再按顺序调用每个 `ChannelWriter::assemble`，将组装出的 `(channel, StateValue)` 追加到 task 的 `writes`。`Command` / `Commands` 暂返回 `UnsupportedPregelCommand`，bound 错误会包装为带节点名的 `PregelTaskFailed`。
+Rust 版当前把对外执行入口收敛为 `PregelTaskManager::execute_pending_tasks`：空任务直接返回，单任务走同步 fast path，多任务使用 `std::thread::scope` 并发执行，并按稳定 task path/id 顺序返回 `PregelTaskWrites`。单任务执行逻辑只作为内部 helper 存在：调用 task 的 `bound` 得到 `NodeOutput`，把 `Update` 转成 `StateValue`、把 `None` 转成 `StateValue::Null`，再按顺序调用每个 `ChannelWriter::assemble`，将组装出的 `(channel, StateValue)` 追加到 task 的 `writes`。
 
-当前不在 `PregelLoop::execute` 中直接实现并发调度，因为 `RuntimeContext<ContextT>` 仍以 `&mut` 形式传入；真正并发执行需要先明确 context 是按 task 复制、集中加锁还是改为更细粒度的运行时句柄。这个取舍保留源项目“节点执行和 writer 只产出 pending writes，channel 更新由后续阶段统一处理”的核心语义，同时避免过早引入 executor、retry、timeout、cache 和 checkpoint 写入策略。
+为贴近源项目 `Runtime.context` 的只读运行依赖约定，Rust 版节点、branch 和 writer 均接收 `&RuntimeContext<ContextT>`，并要求并发执行路径上的 `ContextT: Sync`。runtime 不为用户 context 提供隐式锁；如果调用方需要共享可变依赖，应在 `ContextT` 内显式使用 `Arc<Mutex<_>>` 等线程安全类型。这个取舍保留源项目“节点执行和 writer 只产出 pending writes，channel 更新由后续阶段统一处理”的核心语义，同时避免过早引入 retry、timeout、cache、error handler 和 checkpoint 写入策略。
 
 ## 20. `apply_writes` 先迁移无 checkpoint 的 Update 原语
 

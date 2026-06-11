@@ -523,9 +523,9 @@ mod tests {
         let compiled = graph.compile().unwrap();
         let start = compiled.pregel.nodes.get(START).unwrap();
         let node = compiled.pregel.nodes.get("a").unwrap();
-        let mut context = RuntimeContext { context: () };
+        let context = RuntimeContext { context: () };
         let writes = start.writers[0]
-            .assemble(&StateValue::Null, false, &0, &mut context)
+            .assemble(&StateValue::Null, false, &0, &context)
             .unwrap();
 
         assert_eq!(start.triggers, vec![START.to_string()]);
@@ -709,9 +709,9 @@ mod tests {
 
         let compiled = graph.compile().unwrap();
         let start = compiled.pregel.nodes.get(START).unwrap();
-        let mut context = RuntimeContext { context: () };
+        let context = RuntimeContext { context: () };
         let writes = start.writers[0]
-            .assemble(&StateValue::Null, false, &0, &mut context)
+            .assemble(&StateValue::Null, false, &0, &context)
             .unwrap();
 
         assert_eq!(start.triggers, vec![START.to_string()]);
@@ -734,9 +734,9 @@ mod tests {
 
         let compiled = graph.compile().unwrap();
         let node = compiled.pregel.nodes.get("a").unwrap();
-        let mut context = RuntimeContext { context: () };
+        let context = RuntimeContext { context: () };
         let writes = node.writers[1]
-            .assemble(&StateValue::Null, false, &0, &mut context)
+            .assemble(&StateValue::Null, false, &0, &context)
             .unwrap();
 
         assert_eq!(node.writers.len(), 2);
