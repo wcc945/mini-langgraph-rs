@@ -97,6 +97,9 @@ pub enum GraphError {
     #[error("Pregel stream failed to copy channel `{channel}`: {message}")]
     PregelChannelCopyFailed { channel: String, message: String },
 
+    #[error("Pregel stream runtime failed: {0}")]
+    PregelStreamRuntimeFailed(String),
+
     #[error("Pregel received no input for input channels: {0:?}")]
     EmptyPregelInput(Vec<String>),
 

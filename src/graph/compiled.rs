@@ -172,20 +172,6 @@ where
         Arc::clone(&self.pregel).stream(input, runtime_context)
     }
 
-    pub fn stream_with_mode(
-        &self,
-        input: Option<StateValue>,
-        runtime_context: RuntimeContext<ContextT>,
-        stream_mode: StreamMode,
-    ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError>
-    where
-        StateT: From<StateValue> + Send + 'static,
-        UpdateT: Into<StateValue> + Send + 'static,
-        ContextT: Default + Send + Sync + 'static,
-    {
-        Arc::clone(&self.pregel).stream_with_mode(input, runtime_context, stream_mode)
-    }
-
     pub fn invoke(
         &self,
         input: Option<StateValue>,

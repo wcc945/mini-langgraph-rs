@@ -679,14 +679,9 @@ mod tests {
         graph.set_entry_point("write").unwrap();
         graph.set_finish_point("write").unwrap();
         let compiled = graph.compile().unwrap();
+        let context = RuntimeContext::new(()).with_stream_mode(StreamMode::Updates);
 
-        let mut receiver = compiled
-            .stream_with_mode(
-                Some(StateValue::Null),
-                RuntimeContext::default(),
-                StreamMode::Updates,
-            )
-            .unwrap();
+        let mut receiver = compiled.stream(Some(StateValue::Null), context).unwrap();
         let item = receiver.recv().await.unwrap().unwrap();
 
         assert_eq!(item.mode, StreamMode::Updates);

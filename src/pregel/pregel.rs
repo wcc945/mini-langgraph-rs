@@ -180,24 +180,6 @@ where
         input: Option<StateValue>,
         runtime_context: RuntimeContext<ContextT>,
     ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError> {
-        self.stream_with_context(input, runtime_context)
-    }
-
-    pub(crate) fn stream_with_mode(
-        self: Arc<Self>,
-        input: Option<StateValue>,
-        mut runtime_context: RuntimeContext<ContextT>,
-        stream_mode: StreamMode,
-    ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError> {
-        runtime_context.stream_mode = Some(stream_mode);
-        self.stream_with_context(input, runtime_context)
-    }
-
-    fn stream_with_context(
-        self: Arc<Self>,
-        input: Option<StateValue>,
-        runtime_context: RuntimeContext<ContextT>,
-    ) -> Result<mpsc::Receiver<Result<PregelStreamItem, GraphError>>, GraphError> {
         let (sender, receiver) = mpsc::channel(16);
 
         tokio::spawn(async move {
@@ -252,21 +234,52 @@ where
         input: Option<StateValue>,
         runtime_context: RuntimeContext<ContextT>,
     ) -> Result<StateValue, GraphError> {
-        let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = PregelLoop::new(&self, input, runtime_context, sender)?;
+        let stream_mode = runtime_context.stream_mode.unwrap_or(self.stream_mode);
 
-        loop_state.enter()?;
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| GraphError::PregelStreamRuntimeFailed(error.to_string()))?;
 
-        loop {
-            if !loop_state.tick()? {
-                break;
-            }
+            runtime.block_on(async move {
+                let mut receiver = Arc::clone(&self).stream(input, runtime_context)?;
+                let mut latest = StateValue::Null;
+                let mut chunks = Vec::new();
 
-            loop_state.execute()?;
-            loop_state.after_tick()?;
-        }
+                while let Some(item) = receiver.recv().await {
+                    let item = item?;
+                    match stream_mode {
+                        StreamMode::Values if item.mode == StreamMode::Values => {
+                            latest = item.data;
+                        }
+                        StreamMode::Values => {}
+                        StreamMode::Updates => chunks.push(Self::stream_item_to_state_value(item)),
+                    }
+                }
 
-        loop_state.output()
+                match stream_mode {
+                    StreamMode::Values => Ok(latest),
+                    StreamMode::Updates => Ok(StateValue::List(chunks)),
+                }
+            })
+        })
+        .join()
+        .map_err(|_| GraphError::PregelStreamRuntimeFailed("invoke worker panicked".to_string()))?
+    }
+
+    fn stream_item_to_state_value(item: PregelStreamItem) -> StateValue {
+        StateValue::Object(HashMap::from([
+            ("step".to_string(), StateValue::Number(item.step as f64)),
+            (
+                "mode".to_string(),
+                StateValue::String(match item.mode {
+                    StreamMode::Values => "values".to_string(),
+                    StreamMode::Updates => "updates".to_string(),
+                }),
+            ),
+            ("data".to_string(), item.data),
+        ]))
     }
 }
 
@@ -558,14 +571,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_with_mode_overrides_default_stream_mode() {
+    async fn stream_context_overrides_default_stream_mode() {
         let pregel = Arc::new(stream_pregel());
+        let context = RuntimeContext::new(()).with_stream_mode(StreamMode::Updates);
         let mut receiver = pregel
-            .stream_with_mode(
-                Some(StateValue::String("start".to_string())),
-                RuntimeContext::default(),
-                StreamMode::Updates,
-            )
+            .stream(Some(StateValue::String("start".to_string())), context)
             .unwrap();
 
         let item = receiver.recv().await.unwrap().unwrap();
@@ -615,6 +625,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(output, StateValue::String("a".to_string()));
+    }
+
+    #[test]
+    fn invoke_with_updates_stream_mode_returns_stream_chunks() {
+        let pregel = Arc::new(stream_pregel());
+        let context = RuntimeContext::new(()).with_stream_mode(StreamMode::Updates);
+
+        let output = pregel
+            .invoke(Some(StateValue::String("start".to_string())), context)
+            .unwrap();
+
+        assert_eq!(
+            output,
+            StateValue::List(vec![StateValue::Object(HashMap::from([
+                ("step".to_string(), StateValue::Number(1.0)),
+                (
+                    "mode".to_string(),
+                    StateValue::String("updates".to_string())
+                ),
+                (
+                    "data".to_string(),
+                    StateValue::Object(HashMap::from([(
+                        "b".to_string(),
+                        StateValue::String("a".to_string())
+                    )]))
+                ),
+            ]))])
+        );
     }
 
     #[test]

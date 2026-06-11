@@ -67,14 +67,9 @@ async fn stream_with_updates_emits_node_updates() {
     graph.set_entry_point("write").unwrap();
     graph.set_finish_point("write").unwrap();
     let compiled = graph.compile().unwrap();
+    let context = RuntimeContext::new(()).with_stream_mode(StreamMode::Updates);
 
-    let mut receiver = compiled
-        .stream_with_mode(
-            Some(StateValue::Null),
-            RuntimeContext::default(),
-            StreamMode::Updates,
-        )
-        .unwrap();
+    let mut receiver = compiled.stream(Some(StateValue::Null), context).unwrap();
     let item = receiver.recv().await.unwrap().unwrap();
 
     assert_eq!(item.mode, StreamMode::Updates);
@@ -84,6 +79,41 @@ async fn stream_with_updates_emits_node_updates() {
             "write".to_string(),
             StateValue::Number(1.0)
         )]))
+    );
+}
+
+#[test]
+fn invoke_with_updates_stream_mode_returns_stream_chunks() {
+    let mut graph = graph_with_value_channel();
+    graph
+        .add_node(
+            "write",
+            Box::new(|_, _| Ok(NodeOutput::Update(update_value(1_i64)))),
+        )
+        .unwrap();
+    graph.set_entry_point("write").unwrap();
+    graph.set_finish_point("write").unwrap();
+    let compiled = graph.compile().unwrap();
+    let context = RuntimeContext::new(()).with_stream_mode(StreamMode::Updates);
+
+    let output = compiled.invoke(Some(StateValue::Null), context).unwrap();
+
+    assert_eq!(
+        output,
+        StateValue::List(vec![StateValue::Object(HashMap::from([
+            ("step".to_string(), StateValue::Number(1.0)),
+            (
+                "mode".to_string(),
+                StateValue::String("updates".to_string())
+            ),
+            (
+                "data".to_string(),
+                StateValue::Object(HashMap::from([(
+                    "write".to_string(),
+                    StateValue::Number(1.0)
+                )]))
+            ),
+        ]))])
     );
 }
 

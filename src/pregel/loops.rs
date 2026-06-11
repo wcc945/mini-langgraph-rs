@@ -37,7 +37,6 @@ pub(crate) struct PregelLoop<'a, StateT, UpdateT, ContextT> {
     pub(crate) status: PregelLoopStatus,
     pub(crate) task_manager: PregelTaskManager<'a, StateT, UpdateT, ContextT>,
     pub(crate) updated_channels: Option<HashSet<String>>,
-    pub(crate) output: Option<StateValue>,
     pub(crate) stream_sender: mpsc::Sender<Result<PregelStreamItem, GraphError>>,
     pending_writes: Vec<PregelTaskWrites>,
     runtime_context: RuntimeContext<ContextT>,
@@ -78,7 +77,6 @@ where
             status: PregelLoopStatus::Input,
             task_manager: PregelTaskManager::new(),
             updated_channels: None,
-            output: None,
             stream_sender,
             pending_writes: Vec::new(),
             runtime_context,
@@ -257,33 +255,6 @@ where
         } else {
             Ok(Some(StateValue::Object(values)))
         }
-    }
-
-    pub(crate) fn output(&mut self) -> Result<StateValue, GraphError> {
-        let output = if self.output_channels.len() == 1 {
-            let channel_name = &self.output_channels[0];
-            let Some(channel) = self.channels.get(channel_name) else {
-                return Err(GraphError::UnknownPregelOutputChannel(channel_name.clone()));
-            };
-
-            channel.get()?
-        } else {
-            let mut values = HashMap::new();
-            for channel_name in self.output_channels {
-                let Some(channel) = self.channels.get(channel_name) else {
-                    continue;
-                };
-
-                if channel.is_available() {
-                    values.insert(channel_name.clone(), channel.get()?);
-                }
-            }
-
-            StateValue::Object(values)
-        };
-
-        self.output = Some(output.clone());
-        Ok(output)
     }
 
     fn map_output_updates(&self, tasks: &[PregelTaskWrites]) -> Option<StateValue> {
@@ -715,7 +686,6 @@ mod tests {
         assert_eq!(loop_state.trigger_to_nodes.len(), 1);
         assert_eq!(loop_state.name, "LangGraph");
         assert_eq!(loop_state.updated_channels, None);
-        assert_eq!(loop_state.output, None);
     }
 
     #[test]
@@ -940,55 +910,6 @@ mod tests {
 
         assert!(updated.is_empty());
         assert!(!loop_state.channels.contains_key("missing"));
-    }
-
-    #[test]
-    fn output_reads_single_output_channel() {
-        let pregel = valid_pregel();
-        let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
-        loop_state
-            .apply_writes(&[task(
-                "a",
-                vec!["pull", "a"],
-                vec![],
-                vec![("output", StateValue::String("done".to_string()))],
-            )])
-            .unwrap();
-
-        let output = loop_state.output().unwrap();
-
-        assert_eq!(output, StateValue::String("done".to_string()));
-        assert_eq!(loop_state.output, Some(output));
-    }
-
-    #[test]
-    fn output_reads_multiple_output_channels_and_skips_unavailable_channels() {
-        let mut pregel = valid_pregel();
-        pregel.output_channels = vec!["left".to_string(), "right".to_string()];
-        pregel.channels.insert("left".to_string(), channel());
-        pregel.channels.insert("right".to_string(), channel());
-        pregel.validate().unwrap();
-        let (sender, _receiver) = mpsc::channel(1);
-        let mut loop_state = new_loop(&pregel, Some(StateValue::Null), sender);
-        loop_state
-            .apply_writes(&[task(
-                "a",
-                vec!["pull", "a"],
-                vec![],
-                vec![("right", StateValue::Number(2.0))],
-            )])
-            .unwrap();
-
-        let output = loop_state.output().unwrap();
-
-        assert_eq!(
-            output,
-            StateValue::Object(HashMap::from([(
-                "right".to_string(),
-                StateValue::Number(2.0)
-            )]))
-        );
     }
 
     #[test]
