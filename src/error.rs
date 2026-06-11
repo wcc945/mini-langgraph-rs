@@ -97,6 +97,12 @@ pub enum GraphError {
     #[error("Pregel stream failed to copy channel `{channel}`: {message}")]
     PregelChannelCopyFailed { channel: String, message: String },
 
+    #[error("Pregel received no input for input channels: {0:?}")]
+    EmptyPregelInput(Vec<String>),
+
+    #[error("invalid Pregel input: {0}")]
+    InvalidPregelInput(String),
+
     #[error("compile does not support conditional branches yet")]
     UnsupportedCompiledBranches,
 }

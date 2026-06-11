@@ -190,6 +190,11 @@ where
                 }
             };
 
+            if let Err(error) = loop_state.enter() {
+                let _ = loop_state.stream_sender.send(Err(error)).await;
+                return;
+            }
+
             loop {
                 let should_continue = match loop_state.tick() {
                     Ok(should_continue) => should_continue,
@@ -474,6 +479,19 @@ mod tests {
             .stream(Some(StateValue::String("start".to_string())))
             .unwrap();
 
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_sends_enter_error_for_empty_input() {
+        let pregel = Arc::new(stream_pregel());
+        let mut receiver = pregel.stream(None).unwrap();
+
+        let error = receiver.recv().await.unwrap().unwrap_err();
+
+        assert!(
+            matches!(error, GraphError::EmptyPregelInput(channels) if channels == vec!["input"])
+        );
         assert!(receiver.recv().await.is_none());
     }
 }
