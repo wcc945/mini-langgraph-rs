@@ -72,7 +72,7 @@ mod tests {
         let mapped = node.mapper.as_ref().unwrap()(StateValue::Null).unwrap();
         let output = (node.bound)(&mapped, &mut context).unwrap();
         let writes = node.writers[0]
-            .assemble(StateValue::Number(1.0), true, &mapped, &mut context)
+            .assemble(&StateValue::Number(1.0), true, &mapped, &mut context)
             .unwrap();
 
         assert_eq!(node.channels, vec!["input".to_string()]);

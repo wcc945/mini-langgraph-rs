@@ -302,7 +302,9 @@ pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
 
 源项目 `PregelLoop` / `SyncPregelLoop` 同时承载运行时核心状态和 checkpoint、cache、store、interrupt、debug stream、retry、async executor、生命周期事件等平台能力。Rust 版当前只实现同步 Pregel 主线需要的运行态，并把图规格与运行状态分开：`Pregel` 保存 nodes、channel 原型和配置，`PregelLoop` 持有本次运行复制出的 channels、step、pending writes、updated channels 和输出缓存。
 
-当前 `PregelLoop::new` 从 `Pregel.channels` 和 `Pregel.managed` 复制本次运行专用 map，不再借用或共享这两类运行态。`tick`、`execute`、`after_tick` 和 `is_stream_closed` 目前只保留接口形状，不实现真实调度、执行、更新或发送逻辑；后续补实现时应保持源项目语义：`tick` 只返回是否继续，`execute` 和 `after_tick` 不把 stream chunk 作为返回值暴露给外层，发送动作由 loop 持有的 sender 内部完成。
+当前 `PregelLoop::new` 从 `Pregel.channels` 和 `Pregel.managed` 复制本次运行专用 map，不再借用或共享这两类运行态。`PregelLoop::enter` 对齐源项目 `SyncPregelLoop.__enter__` 的调用边界，并调用 Rust 版 `first` 执行 fresh input 初始化；`first` 只迁移源项目 `_first` 中“输入映射为 channel 写入并产生 `updated_channels`”的主线。`tick`、`execute`、`after_tick` 和 `is_stream_closed` 目前只保留接口形状，不实现真实调度、执行、更新或发送逻辑；后续补实现时应保持源项目语义：`tick` 只返回是否继续，`execute` 和 `after_tick` 不把 stream chunk 作为返回值暴露给外层，发送动作由 loop 持有的 sender 内部完成。
+
+源项目 `_first` 还处理 checkpoint、resume、Command、time travel、delta channel、interrupt 等路径。Rust 版当前没有这些运行时能力，因此 `first` 不写入 pending writes，也不把 `None` 输入解释为 resume；`None` 或无法映射到 input channel 的输入会返回明确错误。
 
 源项目的 `tasks: dict[str, PregelExecutableTask]` 在 Rust 版映射为 `PregelTaskManager`，让任务集合、准备和执行边界集中在 task manager 中。当前暂不迁移 retry、cache、timeout、interrupt、debug stream 和 checkpoint 语义。
 
@@ -312,10 +314,25 @@ pub fn compile(self) -> Result<CompiledStateGraph<...>, GraphError>
 
 channel 的 `copy_box()` 是现有 `BaseChannel::copy()` 的 trait object 版本，具体复制语义仍来自 channel 自身的 `checkpoint()` + `from_checkpoint()`。因此 `LastValue`、`EphemeralValue`、`BinaryOperatorAggregate` 和 `NamedBarrierValue` 都能复用已有 checkpoint 恢复逻辑。managed 的 `copy_box()` 暂只复制 managed spec object，scratchpad 读取语义后续再补。
 
-Rust 版 `stream()` 使用 `tokio::sync::mpsc` 返回 receiver，并由后台 task 创建 `PregelLoop`。为了让后台 task 持有图规格，`CompiledStateGraph` 内部保存 `Arc<Pregel>`；`stream(&self)` 只 clone `Arc` 指针，后台 task 内部创建的 `PregelLoop` 再借用 `Pregel` 中的规格字段。`PregelNode` 和 `ChannelWriter` 本身不需要实现 `Clone`。当前不使用 `Arc<Mutex<channels>>`，连续或并发的 `stream()` 调用不会互相污染 channel 或 managed 状态。
+Rust 版 `stream()` 使用 `tokio::sync::mpsc` 返回 receiver，并由后台 task 创建 `PregelLoop` 后立即调用 `enter()`。为了让后台 task 持有图规格，`CompiledStateGraph` 内部保存 `Arc<Pregel>`；`stream(&self)` 只 clone `Arc` 指针，后台 task 内部创建的 `PregelLoop` 再借用 `Pregel` 中的规格字段。`PregelNode` 和 `ChannelWriter` 本身不需要实现 `Clone`。当前不使用 `Arc<Mutex<channels>>`，连续或并发的 `stream()` 调用不会互相污染 channel 或 managed 状态。
 
 当前节点执行仍是同步闭包，Tokio 只负责后台任务和管道发送。`stream()` 的类型边界暂时要求 `StateT: From<StateValue>`、`UpdateT: Into<StateValue>`、`ContextT: Default`，后续接入 typed state mapper 后再放宽或替换这组 MVP 约束。
 
+## 18. `prepare_task(s)` 先迁移 PULL 任务准备主线
+
+源项目 `prepare_next_tasks` 会合并 PUSH/Send 和 PULL 节点任务，并依赖 checkpoint 版本、versions_seen、scratchpad、Runnable config、cache/retry/timeout、interrupt/resume 等运行时设施判断任务是否可执行。
+
+Rust 版当前只实现 PULL 节点任务准备：`prepare_tasks` 根据 `updated_channels + trigger_to_nodes` 缩小候选节点，没有增量信息时按节点名扫描全部节点；`prepare_task` 在任一 trigger channel 可用时读取普通 channel 输入，组装为 `StateValue::Object`，再交给节点 mapper 或 `StateT::from` 生成任务输入。任务 id 使用确定性字符串，path 使用 `["pull", node_name]` 表达源项目 `(PULL, node_name)`。
+
+由于 Rust 版尚未实现 checkpoint 版本表，当前不复制源项目“channel version 大于 versions_seen 才触发”的完整语义，而是以 channel `is_available()` 作为可执行条件。`ManagedValueSpec` 目前只有 `copy_box()`，没有 scratchpad 相关 `get()`，因此 managed value 只作为合法读取项保留在 node channels 中，暂不注入任务输入。PUSH/Send、cache、retry、timeout、subgraph、interrupt/resume 和 Runnable config 仍暂缓。
+
+## 19. `execute_task` 先作为单任务执行原语
+
+源项目由 `PregelRunner` 并发调度 task，并通过 `run_with_retry` / `arun_with_retry` 执行节点 runnable；节点执行期间 writer 会把 writes 追加到 task，随后由 loop 的 apply/update 阶段统一更新 channel。
+
+Rust 版当前先把这条主线收敛为 `PregelTaskManager::execute_task`：调用 task 的 `bound` 得到 `NodeOutput`，把 `Update` 转成 `StateValue`、把 `None` 转成 `StateValue::Null`，再按顺序调用每个 `ChannelWriter::assemble`，将组装出的 `(channel, StateValue)` 追加到 task 的 `writes`。`Command` / `Commands` 暂返回 `UnsupportedPregelCommand`，bound 错误会包装为带节点名的 `PregelTaskFailed`。
+
+当前不在 `PregelLoop::execute` 中直接实现并发调度，因为 `RuntimeContext<ContextT>` 仍以 `&mut` 形式传入；真正并发执行需要先明确 context 是按 task 复制、集中加锁还是改为更细粒度的运行时句柄。这个取舍保留源项目“节点执行和 writer 只产出 pending writes，channel 更新由后续阶段统一处理”的核心语义，同时避免过早引入 executor、retry、timeout、cache 和 checkpoint 写入策略。
 ## 当前仍需谨慎的地方
 
 - 当前源码仍是骨架，很多类型未公开或未使用，warning 是预期状态。
@@ -323,3 +340,4 @@ Rust 版 `stream()` 使用 `tokio::sync::mpsc` 返回 receiver，并由后台 ta
 - `DynChannel` 解决了异构 channel 存储，但会把字段类型检查推迟到运行时。
 - `ManagedValueSpec` 目前只是空 trait，还没有 scratchpad 读取能力。
 - `schemas` 暂不迁移是有意取舍，不代表后续永远不需要。
+

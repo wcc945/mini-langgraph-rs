@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::channel::channel_writer::ChannelWriter;
 use crate::channel::{DynChannel, StateValue};
 use crate::error::GraphError;
+use crate::graph::node::NodeOutput;
 use crate::managed::ManagedValueSpec;
 use crate::pregel::node::{PregelNode, PregelNodeBound};
 use crate::runtime::RuntimeContext;
@@ -115,14 +116,32 @@ where
 
     pub(crate) fn execute_task(
         &mut self,
-        task: PregelExecutableTask<'a, StateT, UpdateT, ContextT>,
+        mut task: PregelExecutableTask<'a, StateT, UpdateT, ContextT>,
         context: &mut RuntimeContext<ContextT>,
     ) -> Result<PregelExecutableTask<'a, StateT, UpdateT, ContextT>, GraphError>
     where
         UpdateT: Into<StateValue>,
     {
-        let _ = (task, context);
-        todo!("execute_task runtime logic is not implemented yet")
+        let output =
+            (task.bound)(&task.input, context).map_err(|error| GraphError::PregelTaskFailed {
+                node: task.name.clone(),
+                message: error.to_string(),
+            })?;
+
+        let output = match output {
+            NodeOutput::Update(update) => update.into(),
+            NodeOutput::None => StateValue::Null,
+            NodeOutput::Command(_) | NodeOutput::Commands(_) => {
+                return Err(GraphError::UnsupportedPregelCommand);
+            }
+        };
+
+        for writer in task.writers {
+            task.writes
+                .extend(writer.assemble(&output, true, &task.input, context)?);
+        }
+
+        Ok(task)
     }
 
     fn proc_input(
@@ -168,6 +187,9 @@ where
 mod tests {
     use super::*;
     use crate::channel::BaseChannel;
+    use crate::channel::channel_writer::{
+        ChannelWriteEntry, ChannelWriteTupleEntry, ChannelWriteValue, ChannelWriterEntry,
+    };
     use crate::channel::ephemeral_value::EphemeralValue;
     use crate::channel::last_value::LastValue;
     use crate::graph::node::NodeOutput;
@@ -207,6 +229,24 @@ mod tests {
             Vec::new(),
             Box::new(|state, _| Ok(NodeOutput::Update(state.clone()))),
         )
+    }
+
+    fn passthrough_writer(channel: &str) -> ChannelWriter<StateValue, ()> {
+        ChannelWriter::new(vec![ChannelWriterEntry::Channel(ChannelWriteEntry {
+            channel: channel.to_string(),
+            value: ChannelWriteValue::Passthrough,
+            skip_none: false,
+            mapper: None,
+        })])
+    }
+
+    fn fixed_writer(channel: &str, value: StateValue) -> ChannelWriter<StateValue, ()> {
+        ChannelWriter::new(vec![ChannelWriterEntry::Channel(ChannelWriteEntry {
+            channel: channel.to_string(),
+            value: ChannelWriteValue::Value(value),
+            skip_none: false,
+            mapper: None,
+        })])
     }
 
     #[test]
@@ -462,5 +502,266 @@ mod tests {
             GraphError::UnknownPregelReadChannel { node, channel }
                 if node == "a" && channel == "missing"
         ));
+    }
+
+    #[test]
+    fn execute_task_runs_bound_and_assembles_writers_in_order() {
+        let node = PregelNode::new(
+            vec!["input".to_string()],
+            vec!["trigger".to_string()],
+            None,
+            vec![passthrough_writer("left"), passthrough_writer("right")],
+            Box::new(|_, _| Ok(NodeOutput::Update(StateValue::Number(7.0)))),
+        );
+        let nodes = HashMap::from([("a".to_string(), node)]);
+        let channels = HashMap::from([
+            ("input".to_string(), last_value(Some(StateValue::Null))),
+            ("trigger".to_string(), trigger(true)),
+        ]);
+        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let task = manager
+            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .unwrap()
+            .unwrap();
+        let mut context = RuntimeContext { context: () };
+
+        let task = manager.execute_task(task, &mut context).unwrap();
+
+        assert_eq!(
+            task.writes,
+            vec![
+                ("left".to_string(), StateValue::Number(7.0)),
+                ("right".to_string(), StateValue::Number(7.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_task_passes_task_input_and_context_to_executable_writer() {
+        let writer = ChannelWriter::new(vec![ChannelWriterEntry::Executable(Box::new(
+            |state: &StateValue, context: &mut RuntimeContext<i64>| {
+                let StateValue::Object(values) = state else {
+                    return Err(GraphError::InvalidPregelInput(format!(
+                        "expected object input, got {state:?}"
+                    )));
+                };
+                let Some(StateValue::Number(seed)) = values.get("input") else {
+                    return Err(GraphError::InvalidPregelInput(
+                        "missing input seed".to_string(),
+                    ));
+                };
+
+                context.context += *seed as i64;
+                Ok(vec![ChannelWriteEntry {
+                    channel: "seen".to_string(),
+                    value: ChannelWriteValue::Value(StateValue::Number(context.context as f64)),
+                    skip_none: false,
+                    mapper: None,
+                }])
+            },
+        ))]);
+        let node = PregelNode::new(
+            vec!["input".to_string()],
+            vec!["trigger".to_string()],
+            None,
+            vec![writer],
+            Box::new(|_, context| {
+                context.context += 1;
+                Ok(NodeOutput::None)
+            }),
+        );
+        let nodes = HashMap::from([("a".to_string(), node)]);
+        let channels = HashMap::from([
+            (
+                "input".to_string(),
+                last_value(Some(StateValue::Number(4.0))),
+            ),
+            ("trigger".to_string(), trigger(true)),
+        ]);
+        let mut manager = PregelTaskManager::<StateValue, StateValue, i64>::new();
+        let task = manager
+            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .unwrap()
+            .unwrap();
+        let mut context = RuntimeContext { context: 2 };
+
+        let task = manager.execute_task(task, &mut context).unwrap();
+
+        assert_eq!(context.context, 7);
+        assert_eq!(
+            task.writes,
+            vec![("seen".to_string(), StateValue::Number(7.0))]
+        );
+    }
+
+    #[test]
+    fn execute_task_keeps_existing_writes_and_appends_new_writes() {
+        let node = PregelNode::new(
+            vec!["input".to_string()],
+            vec!["trigger".to_string()],
+            None,
+            vec![fixed_writer("new", StateValue::String("write".to_string()))],
+            Box::new(|_, _| Ok(NodeOutput::None)),
+        );
+        let nodes = HashMap::from([("a".to_string(), node)]);
+        let channels = HashMap::from([
+            ("input".to_string(), last_value(Some(StateValue::Null))),
+            ("trigger".to_string(), trigger(true)),
+        ]);
+        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let mut task = manager
+            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .unwrap()
+            .unwrap();
+        task.writes
+            .push(("old".to_string(), StateValue::String("kept".to_string())));
+        let mut context = RuntimeContext { context: () };
+
+        let task = manager.execute_task(task, &mut context).unwrap();
+
+        assert_eq!(
+            task.writes,
+            vec![
+                ("old".to_string(), StateValue::String("kept".to_string())),
+                ("new".to_string(), StateValue::String("write".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_task_returns_null_output_for_none() {
+        let state_writer =
+            ChannelWriter::new(vec![ChannelWriterEntry::Tuple(ChannelWriteTupleEntry {
+                mapper: Box::new(|value| match value {
+                    StateValue::Null => Ok(Vec::new()),
+                    other => Err(GraphError::InvalidChannelUpdate(format!(
+                        "expected null, got {other:?}"
+                    ))),
+                }),
+            })]);
+        let node = PregelNode::new(
+            vec!["input".to_string()],
+            vec!["trigger".to_string()],
+            None,
+            vec![
+                state_writer,
+                fixed_writer("next", StateValue::String("ready".to_string())),
+            ],
+            Box::new(|_, _| Ok(NodeOutput::None)),
+        );
+        let nodes = HashMap::from([("a".to_string(), node)]);
+        let channels = HashMap::from([
+            ("input".to_string(), last_value(Some(StateValue::Null))),
+            ("trigger".to_string(), trigger(true)),
+        ]);
+        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let task = manager
+            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .unwrap()
+            .unwrap();
+        let mut context = RuntimeContext { context: () };
+
+        let task = manager.execute_task(task, &mut context).unwrap();
+
+        assert_eq!(
+            task.writes,
+            vec![("next".to_string(), StateValue::String("ready".to_string()))]
+        );
+    }
+
+    #[test]
+    fn execute_task_rejects_command_outputs() {
+        let node = PregelNode::new(
+            vec!["input".to_string()],
+            vec!["trigger".to_string()],
+            None,
+            Vec::new(),
+            Box::new(|_, _| Ok(NodeOutput::Commands(Vec::new()))),
+        );
+        let nodes = HashMap::from([("a".to_string(), node)]);
+        let channels = HashMap::from([
+            ("input".to_string(), last_value(Some(StateValue::Null))),
+            ("trigger".to_string(), trigger(true)),
+        ]);
+        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let task = manager
+            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .unwrap()
+            .unwrap();
+        let mut context = RuntimeContext { context: () };
+
+        let error = match manager.execute_task(task, &mut context) {
+            Ok(_) => panic!("execute_task should reject command outputs"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, GraphError::UnsupportedPregelCommand));
+    }
+
+    #[test]
+    fn execute_task_wraps_bound_errors_with_node_name() {
+        let node = PregelNode::new(
+            vec!["input".to_string()],
+            vec!["trigger".to_string()],
+            None,
+            Vec::new(),
+            Box::new(|_, _| Err(GraphError::InvalidPregelInput("bad".to_string()))),
+        );
+        let nodes = HashMap::from([("a".to_string(), node)]);
+        let channels = HashMap::from([
+            ("input".to_string(), last_value(Some(StateValue::Null))),
+            ("trigger".to_string(), trigger(true)),
+        ]);
+        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let task = manager
+            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .unwrap()
+            .unwrap();
+        let mut context = RuntimeContext { context: () };
+
+        let error = match manager.execute_task(task, &mut context) {
+            Ok(_) => panic!("execute_task should wrap bound errors"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            GraphError::PregelTaskFailed { node, message }
+                if node == "a" && message == "invalid Pregel input: bad"
+        ));
+    }
+
+    #[test]
+    fn execute_task_propagates_writer_errors() {
+        let writer = ChannelWriter::new(vec![ChannelWriterEntry::Tuple(ChannelWriteTupleEntry {
+            mapper: Box::new(|_| Err(GraphError::InvalidChannelUpdate("bad writer".to_string()))),
+        })]);
+        let node = PregelNode::new(
+            vec!["input".to_string()],
+            vec!["trigger".to_string()],
+            None,
+            vec![writer],
+            Box::new(|_, _| Ok(NodeOutput::Update(StateValue::Null))),
+        );
+        let nodes = HashMap::from([("a".to_string(), node)]);
+        let channels = HashMap::from([
+            ("input".to_string(), last_value(Some(StateValue::Null))),
+            ("trigger".to_string(), trigger(true)),
+        ]);
+        let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
+        let task = manager
+            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .unwrap()
+            .unwrap();
+        let mut context = RuntimeContext { context: () };
+
+        let error = match manager.execute_task(task, &mut context) {
+            Ok(_) => panic!("execute_task should propagate writer errors"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, GraphError::InvalidChannelUpdate(message) if message == "bad writer")
+        );
     }
 }

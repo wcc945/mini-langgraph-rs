@@ -55,7 +55,7 @@ impl<StateT, ContextT> ChannelWriter<StateT, ContextT> {
 
     pub(crate) fn assemble(
         &self,
-        output: StateValue,
+        output: &StateValue,
         allow_passthrough: bool,
         state: &StateT,
         context: &mut RuntimeContext<ContextT>,
@@ -66,7 +66,7 @@ impl<StateT, ContextT> ChannelWriter<StateT, ContextT> {
             match entry {
                 ChannelWriterEntry::Channel(entry) => {
                     if let Some(write) =
-                        Self::assemble_channel_entry(entry, &output, allow_passthrough)?
+                        Self::assemble_channel_entry(entry, output, allow_passthrough)?
                     {
                         writes.push(write);
                     }
@@ -74,14 +74,14 @@ impl<StateT, ContextT> ChannelWriter<StateT, ContextT> {
                 ChannelWriterEntry::Tuple(entry) => {
                     writes.extend(Self::assemble_tuple_entry(
                         entry,
-                        &output,
+                        output,
                         allow_passthrough,
                     )?);
                 }
                 ChannelWriterEntry::Executable(executable) => {
                     for entry in executable(state, context)? {
                         if let Some(write) =
-                            Self::assemble_channel_entry(&entry, &output, allow_passthrough)?
+                            Self::assemble_channel_entry(&entry, output, allow_passthrough)?
                         {
                             writes.push(write);
                         }
@@ -218,7 +218,7 @@ mod tests {
         allow_passthrough: bool,
     ) -> Result<Vec<(String, StateValue)>, GraphError> {
         let mut context = RuntimeContext { context: () };
-        writer.assemble(output, allow_passthrough, &(), &mut context)
+        writer.assemble(&output, allow_passthrough, &(), &mut context)
     }
 
     #[test]
@@ -390,7 +390,7 @@ mod tests {
         let mut context = RuntimeContext { context: 2 };
 
         let writes = writer
-            .assemble(StateValue::Null, false, &3, &mut context)
+            .assemble(&StateValue::Null, false, &3, &mut context)
             .unwrap();
 
         assert_eq!(
