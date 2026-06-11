@@ -30,7 +30,7 @@
 4. 在 `CompiledStateGraph` 上暴露运行入口并补 crate root 导出。
 - 验证：`StateValue`、`StreamMode`、`PregelStreamItem` 可由外部调用方命名；`CompiledStateGraph::invoke` / `stream` 作为薄转发工作。
 5. 补端到端运行测试。
-- 验证：`StateGraph -> compile -> invoke` 返回预期状态；`stream(Updates)` 能收到节点更新；节点能读取 `RuntimeContext.context`；条件边和 waiting edge 编译后可实际调度执行。
+- 验证：`StateGraph -> compile -> invoke` 返回预期状态；`stream(Updates)` 能收到节点更新；节点能读取 `RuntimeContext.context`；多 state/output channel、顺序链路、条件入口、条件边和 waiting edge 编译后可实际调度执行；公开 API 错误路径有集成覆盖。
 6. 同步文档。
    - 验证：runtime、core graph 和 Rust 化取舍文档反映 MVP 已完成能力和仍暂缓能力。
 
@@ -41,7 +41,7 @@
 - 已实现 `Pregel::stream(input, runtime_context)`，单次调用可通过 `RuntimeContext.stream_mode` 覆盖默认 stream mode。
 - 已实现 `CompiledStateGraph::invoke(input, runtime_context)`、`stream(input, runtime_context)` 转发。
 - 已公开并 re-export `StateValue`、`StreamMode`、`PregelStreamItem`。
-- 已补充 loop、Pregel 和 StateGraph 端到端测试。
+- 已补充 loop、Pregel 和 StateGraph 端到端测试；`tests/mvp_runtime.rs` 当前从公开 API 视角覆盖 24 条 MVP 运行时行为。
 
 ## 验证命令
 
