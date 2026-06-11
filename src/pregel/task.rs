@@ -19,6 +19,24 @@ pub(crate) struct PregelExecutableTask<'a, StateT, UpdateT, ContextT> {
     pub(crate) path: Vec<String>,
 }
 
+pub(crate) struct PregelTaskWrites {
+    pub(crate) name: String,
+    pub(crate) writes: Vec<(String, StateValue)>,
+    pub(crate) triggers: Vec<String>,
+    pub(crate) path: Vec<String>,
+}
+
+impl<'a, StateT, UpdateT, ContextT> PregelExecutableTask<'a, StateT, UpdateT, ContextT> {
+    pub(crate) fn to_writes(&self) -> PregelTaskWrites {
+        PregelTaskWrites {
+            name: self.name.clone(),
+            writes: self.writes.clone(),
+            triggers: self.triggers.clone(),
+            path: self.path.clone(),
+        }
+    }
+}
+
 pub(crate) struct PregelTaskManager<'a, StateT, UpdateT, ContextT> {
     tasks: HashMap<String, PregelExecutableTask<'a, StateT, UpdateT, ContextT>>,
 }
