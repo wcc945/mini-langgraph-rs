@@ -1,2 +1,6 @@
 /target
 .idea/
+
+# Benchmark outputs
+benches/bench_output.txt
+benches/python_bench_results.json
