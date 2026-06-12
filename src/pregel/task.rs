@@ -75,6 +75,8 @@ where
         trigger_to_nodes: &HashMap<String, Vec<String>>,
         updated_channels: Option<&HashSet<String>>,
         step: usize,
+        channel_versions: &HashMap<String, u64>,
+        versions_seen: &HashMap<String, HashMap<String, u64>>,
     ) -> Result<Vec<&PregelExecutableTask<'a, StateT, UpdateT, ContextT>>, GraphError> {
         let mut candidate_nodes = match updated_channels {
             Some(updated_channels) => updated_channels
@@ -90,7 +92,15 @@ where
         let mut task_ids = Vec::new();
 
         for name in candidate_nodes {
-            if let Some(task) = self.prepare_task(name, nodes, channels, managed, step)? {
+            if let Some(task) = self.prepare_task(
+                name,
+                nodes,
+                channels,
+                managed,
+                step,
+                channel_versions,
+                versions_seen,
+            )? {
                 let id = task.id.clone();
                 self.submit_task(task);
                 task_ids.push(id);
@@ -110,16 +120,37 @@ where
         channels: &HashMap<String, Box<DynChannel>>,
         managed: &HashMap<String, Box<dyn ManagedValueSpec>>,
         step: usize,
+        channel_versions: &HashMap<String, u64>,
+        versions_seen: &HashMap<String, HashMap<String, u64>>,
     ) -> Result<Option<PregelExecutableTask<'a, StateT, UpdateT, ContextT>>, GraphError> {
         let Some(node) = nodes.get(&name) else {
             return Ok(None);
         };
 
-        if !node.triggers.iter().any(|trigger| {
-            channels
-                .get(trigger)
-                .is_some_and(|channel| channel.is_available())
-        }) {
+        // Check triggers: if versions_seen exists, only trigger when
+        // a channel's current version exceeds the node's previously seen version.
+        let seen = versions_seen.get(&name);
+        let should_run = node.triggers.iter().any(|trigger| {
+            let Some(channel) = channels.get(trigger) else {
+                return false;
+            };
+            if !channel.is_available() {
+                return false;
+            }
+            match seen {
+                Some(seen_map) => {
+                    let cur = channel_versions.get(trigger).copied();
+                    let prev = seen_map.get(trigger).copied();
+                    match (cur, prev) {
+                        (Some(c), Some(p)) => c > p,
+                        (Some(_), None) => true,
+                        _ => false,
+                    }
+                }
+                None => true,
+            }
+        });
+        if !should_run {
             return Ok(None);
         }
 
@@ -346,7 +377,15 @@ mod tests {
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
 
         let task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 2)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &HashMap::new(),
+                2,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap()
             .unwrap();
 
@@ -383,7 +422,15 @@ mod tests {
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
 
         let task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 2)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &HashMap::new(),
+                2,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap();
 
         assert!(task.is_none());
@@ -408,7 +455,15 @@ mod tests {
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
 
         let task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &HashMap::new(),
+                0,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap()
             .unwrap();
 
@@ -451,7 +506,15 @@ mod tests {
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
 
         let task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &HashMap::new(),
+                0,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap()
             .unwrap();
 
@@ -492,6 +555,8 @@ mod tests {
                     &trigger_to_nodes,
                     Some(&updated_channels),
                     1,
+                    &HashMap::new(),
+                    &HashMap::new(),
                 )
                 .unwrap();
             tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>()
@@ -524,7 +589,16 @@ mod tests {
 
         let task_ids = {
             let tasks = manager
-                .prepare_tasks(&nodes, &channels, &HashMap::new(), &HashMap::new(), None, 1)
+                .prepare_tasks(
+                    &nodes,
+                    &channels,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    None,
+                    1,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                )
                 .unwrap();
             tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>()
         };
@@ -554,7 +628,15 @@ mod tests {
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
 
         let task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &managed, 0)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &managed,
+                0,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap()
             .unwrap();
 
@@ -574,11 +656,18 @@ mod tests {
         let channels = HashMap::from([("trigger".to_string(), trigger(true))]);
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
 
-        let error =
-            match manager.prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0) {
-                Ok(_) => panic!("prepare_task should reject unknown read channel"),
-                Err(error) => error,
-            };
+        let error = match manager.prepare_task(
+            "a".to_string(),
+            &nodes,
+            &channels,
+            &HashMap::new(),
+            0,
+            &HashMap::new(),
+            &HashMap::new(),
+        ) {
+            Ok(_) => panic!("prepare_task should reject unknown read channel"),
+            Err(error) => error,
+        };
 
         assert!(matches!(
             error,
@@ -603,7 +692,15 @@ mod tests {
         ]);
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &HashMap::new(),
+                0,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap()
             .unwrap();
         let context = RuntimeContext::new(());
@@ -661,7 +758,15 @@ mod tests {
         ]);
         let manager = PregelTaskManager::<StateValue, StateValue, i64>::new();
         let task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &HashMap::new(),
+                0,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap()
             .unwrap();
         let context = RuntimeContext::new(2);
@@ -691,7 +796,15 @@ mod tests {
         ]);
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let mut task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &HashMap::new(),
+                0,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap()
             .unwrap();
         task.writes
@@ -737,7 +850,15 @@ mod tests {
         ]);
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &HashMap::new(),
+                0,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap()
             .unwrap();
         let context = RuntimeContext::new(());
@@ -766,7 +887,15 @@ mod tests {
         ]);
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &HashMap::new(),
+                0,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap()
             .unwrap();
         let context = RuntimeContext::new(());
@@ -795,7 +924,15 @@ mod tests {
         ]);
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &HashMap::new(),
+                0,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap()
             .unwrap();
         let context = RuntimeContext::new(());
@@ -831,7 +968,15 @@ mod tests {
         ]);
         let manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         let task = manager
-            .prepare_task("a".to_string(), &nodes, &channels, &HashMap::new(), 0)
+            .prepare_task(
+                "a".to_string(),
+                &nodes,
+                &channels,
+                &HashMap::new(),
+                0,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
             .unwrap()
             .unwrap();
         let context = RuntimeContext::new(());
@@ -888,7 +1033,16 @@ mod tests {
         let mut manager = PregelTaskManager::<StateValue, StateValue, ()>::new();
         {
             let tasks = manager
-                .prepare_tasks(&nodes, &channels, &HashMap::new(), &HashMap::new(), None, 0)
+                .prepare_tasks(
+                    &nodes,
+                    &channels,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    None,
+                    0,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                )
                 .unwrap();
             assert_eq!(tasks.len(), 2);
         }

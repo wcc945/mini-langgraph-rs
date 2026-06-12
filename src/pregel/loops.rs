@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::channel::{DynChannel, StateValue};
+use crate::checkpoint::{
+    Checkpoint, CheckpointConfig, CheckpointMetadata, CheckpointSaver, CheckpointSource,
+    MemorySaver, create_checkpoint, empty_checkpoint,
+};
 use crate::error::GraphError;
 use crate::managed::ManagedValueSpec;
 use crate::pregel::node::PregelNode;
@@ -36,6 +40,13 @@ pub(crate) struct PregelLoop<'a, StateT, UpdateT, ContextT> {
     pub(crate) stop: usize,
     pub(crate) status: PregelLoopStatus,
     pub(crate) task_manager: PregelTaskManager<'a, StateT, UpdateT, ContextT>,
+
+    pub(crate) channel_versions: HashMap<String, u64>,
+    pub(crate) versions_seen: HashMap<String, HashMap<String, u64>>,
+    checkpointer: Option<MemorySaver>,
+    checkpoint: Option<Checkpoint>,
+    checkpoint_metadata: Option<CheckpointMetadata>,
+    checkpoint_config: Option<CheckpointConfig>,
     pub(crate) updated_channels: Option<HashSet<String>>,
     pub(crate) stream_sender: mpsc::Sender<Result<PregelStreamItem, GraphError>>,
     pending_writes: Vec<PregelTaskWrites>,
@@ -51,7 +62,7 @@ where
     pub(crate) fn new(
         pregel: &'a Pregel<StateT, UpdateT, ContextT>,
         input: Option<StateValue>,
-        runtime_context: RuntimeContext<ContextT>,
+        mut runtime_context: RuntimeContext<ContextT>,
         stream_sender: mpsc::Sender<Result<PregelStreamItem, GraphError>>,
     ) -> Result<Self, GraphError> {
         let channels = pregel.copy_channels()?;
@@ -79,13 +90,92 @@ where
             updated_channels: None,
             stream_sender,
             pending_writes: Vec::new(),
+            channel_versions: HashMap::new(),
+            versions_seen: HashMap::new(),
+            checkpointer: runtime_context.checkpointer.take(),
+            checkpoint: None,
+            checkpoint_metadata: None,
+            checkpoint_config: None,
             runtime_context,
         })
     }
 
     pub(crate) fn enter(&mut self) -> Result<(), GraphError> {
+        // Load or initialize checkpoint, then restore channel state from it.
+        if let Some(ref mut saver) = self.checkpointer {
+            let config = CheckpointConfig {
+                thread_id: "default".to_string(),
+                checkpoint_ns: String::new(),
+                checkpoint_id: None,
+            };
+            let tuple = saver.get_tuple(&config)?;
+            let pending_writes_from_checkpoint: Vec<(String, StateValue)> = tuple
+                .as_ref()
+                .map(|t| {
+                    t.pending_writes
+                        .iter()
+                        .map(|pw| (pw.channel.clone(), pw.value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.checkpoint = tuple
+                .as_ref()
+                .map(|t| t.checkpoint.clone())
+                .or_else(|| Some(empty_checkpoint()));
+            self.checkpoint_metadata = tuple.as_ref().map(|t| t.metadata.clone());
+            self.checkpoint_config = Some(config);
+
+            // Apply pending writes from the loaded checkpoint.
+            if !pending_writes_from_checkpoint.is_empty() {
+                let task_writes = vec![PregelTaskWrites {
+                    name: "replay".to_string(),
+                    writes: pending_writes_from_checkpoint,
+                    triggers: Vec::new(),
+                    path: vec!["replay".to_string()],
+                }];
+                let _ = self.apply_writes(&task_writes);
+            }
+
+            // Restore channel values from checkpoint.
+            if let Some(ref cp) = self.checkpoint {
+                for (name, value) in &cp.channel_values {
+                    if let Some(channel) = self.channels.get_mut(name) {
+                        if channel.update(vec![value.clone()]).is_ok() {}
+                    }
+                }
+                self.channel_versions = cp.channel_versions.clone();
+                self.versions_seen = cp.versions_seen.clone();
+
+                // If resuming from a prior checkpoint (non-empty channel_versions),
+                // record the current channel versions as seen by INTERRUPT.
+                if !cp.channel_versions.is_empty() {
+                    let mut interrupt_seen: HashMap<String, u64> = HashMap::new();
+                    for (channel, version) in &cp.channel_versions {
+                        interrupt_seen.insert(channel.clone(), *version);
+                    }
+                    self.versions_seen
+                        .insert("__interrupt__".to_string(), interrupt_seen);
+
+                    // Resume step from checkpoint metadata.
+                    if let Some(ref meta) = self.checkpoint_metadata {
+                        self.step = (meta.step + 1) as usize;
+                        self.stop = self.step + self.recursion_limit + 1;
+                    }
+                }
+            }
+        }
+
         let input_channels = self.input_channels.to_vec();
         self.updated_channels = self.first(&input_channels)?;
+
+        for channel in self.updated_channels.iter().flatten() {
+            let next = self.channel_versions.get(channel).map_or(1u64, |v| v + 1);
+            self.channel_versions.insert(channel.clone(), next);
+        }
+
+        // Save input checkpoint if checkpointer is present.
+        self.put_checkpoint(CheckpointSource::Input)?;
+
         self.status = PregelLoopStatus::Pending;
 
         Ok(())
@@ -162,7 +252,7 @@ where
         }
 
         let mut pending_writes_by_channel = BTreeMap::<String, Vec<StateValue>>::new();
-        for task in sorted_tasks {
+        for task in &sorted_tasks {
             let _ = &task.name;
             for (channel, value) in &task.writes {
                 if self.channels.contains_key(channel) {
@@ -216,6 +306,21 @@ where
 
                     if channel_state.finish()? && channel_state.is_available() {
                         updated_channels.insert(channel);
+                    }
+                }
+            }
+        }
+
+        // Update versions_seen: record which channel versions each task has seen.
+        for task in &sorted_tasks {
+            if !task.triggers.is_empty() {
+                let seen = self
+                    .versions_seen
+                    .entry(task.name.clone())
+                    .or_insert_with(HashMap::new);
+                for trigger in &task.triggers {
+                    if let Some(&version) = self.channel_versions.get(trigger) {
+                        seen.insert(trigger.clone(), version);
                     }
                 }
             }
@@ -349,6 +454,8 @@ where
             self.trigger_to_nodes,
             self.updated_channels.as_ref(),
             self.step,
+            &self.channel_versions,
+            &self.versions_seen,
         )?;
 
         if tasks.is_empty() {
@@ -386,6 +493,27 @@ where
 
     pub(crate) fn after_tick(&mut self) -> Result<(), GraphError> {
         let pending_writes = std::mem::take(&mut self.pending_writes);
+
+        // Write pending writes to checkpointer if present (per task).
+        if let Some(ref mut saver) = self.checkpointer {
+            if let Some(ref config) = self.checkpoint_config {
+                for task in &pending_writes {
+                    let writes: Vec<crate::checkpoint::PendingWrite> = task
+                        .writes
+                        .iter()
+                        .map(|(channel, value)| crate::checkpoint::PendingWrite {
+                            task_id: task.name.clone(),
+                            channel: channel.clone(),
+                            value: value.clone(),
+                        })
+                        .collect();
+                    if !writes.is_empty() {
+                        let _ = saver.put_writes(config, writes, &task.name);
+                    }
+                }
+            }
+        }
+
         let updated_channels = self.apply_writes(&pending_writes)?;
         let stream_channels = self
             .stream_channels
@@ -410,7 +538,82 @@ where
         }
 
         self.updated_channels = Some(updated_channels);
+
+        for channel in self.updated_channels.iter().flatten() {
+            let next = self.channel_versions.get(channel).map_or(1u64, |v| v + 1);
+            self.channel_versions.insert(channel.clone(), next);
+        }
+        self.put_checkpoint(CheckpointSource::Loop)?;
+
         self.step += 1;
+
+        Ok(())
+    }
+
+    /// Save a checkpoint via the checkpointer (if present).
+    fn put_checkpoint(&mut self, source: CheckpointSource) -> Result<(), GraphError> {
+        let Some(ref mut saver) = self.checkpointer else {
+            return Ok(());
+        };
+
+        let prev = self
+            .checkpoint
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(empty_checkpoint);
+
+        let new_checkpoint = create_checkpoint(
+            &prev,
+            &self.channels,
+            self.step,
+            &self.channel_versions,
+            self.updated_channels.as_ref(),
+        )?;
+
+        let parent_id = self
+            .checkpoint_config
+            .as_ref()
+            .and_then(|c| c.checkpoint_id.clone());
+
+        let metadata = CheckpointMetadata {
+            source,
+            step: if source == CheckpointSource::Input {
+                -1
+            } else {
+                self.step as i64
+            },
+            parents: parent_id
+                .map_or_else(HashMap::new, |pid| HashMap::from([("".to_string(), pid)])),
+        };
+
+        let mut new_versions = HashMap::new();
+        for channel in self.updated_channels.iter().flatten() {
+            new_versions.insert(
+                channel.clone(),
+                self.channel_versions.get(channel).copied().unwrap_or(1),
+            );
+        }
+
+        let config = self
+            .checkpoint_config
+            .as_ref()
+            .cloned()
+            .unwrap_or(CheckpointConfig {
+                thread_id: "default".to_string(),
+                checkpoint_ns: String::new(),
+                checkpoint_id: self.checkpoint.as_ref().map(|c| c.id.clone()),
+            });
+
+        let new_config = saver.put(&config, new_checkpoint.clone(), metadata, new_versions)?;
+        self.checkpoint_config = Some(new_config);
+        self.checkpoint = Some(new_checkpoint);
+
+        // Sync channel versions from the new checkpoint back to loop state.
+        self.channel_versions = self
+            .checkpoint
+            .as_ref()
+            .map(|cp| cp.channel_versions.clone())
+            .unwrap_or_default();
 
         Ok(())
     }
@@ -1154,6 +1357,8 @@ mod tests {
                     loop_state.trigger_to_nodes,
                     loop_state.updated_channels.as_ref(),
                     loop_state.step,
+                    &loop_state.channel_versions,
+                    &loop_state.versions_seen,
                 )
                 .unwrap();
             assert_eq!(tasks.len(), 1);
@@ -1350,5 +1555,199 @@ mod tests {
         drop(receiver);
 
         assert!(loop_state.is_stream_closed());
+    }
+    // --- Checkpoint integration tests ---
+
+    fn new_loop_with_saver<'a>(
+        pregel: &'a Pregel<StateValue, StateValue, ()>,
+        input: Option<StateValue>,
+        sender: mpsc::Sender<Result<PregelStreamItem, GraphError>>,
+        saver: MemorySaver,
+    ) -> PregelLoop<'a, StateValue, StateValue, ()> {
+        PregelLoop::new(
+            pregel,
+            input,
+            RuntimeContext::new(()).with_checkpointer(saver),
+            sender,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn enter_with_checkpointer_creates_empty_checkpoint_when_no_prior_state() {
+        let pregel = valid_pregel();
+        let (sender, _receiver) = mpsc::channel(1);
+        let saver = MemorySaver::new();
+        let mut loop_state =
+            new_loop_with_saver(&pregel, Some(StateValue::Number(1.0)), sender, saver);
+
+        loop_state.enter().unwrap();
+
+        assert!(loop_state.checkpoint.is_some());
+        let cp = loop_state.checkpoint.unwrap();
+        assert!(cp.channel_versions.contains_key("input"));
+    }
+
+    #[test]
+    fn after_tick_with_checkpointer_saves_loop_checkpoint() {
+        let pregel = Pregel::new(
+            HashMap::from([(
+                "a".to_string(),
+                PregelNode::new(
+                    vec!["input".to_string()],
+                    vec!["input".to_string()],
+                    None,
+                    vec![fixed_writer(
+                        "output",
+                        StateValue::String("done".to_string()),
+                    )],
+                    Box::new(|_, _| Ok(NodeOutput::<StateValue>::None)),
+                ),
+            )]),
+            HashMap::from([
+                ("input".to_string(), channel()),
+                ("output".to_string(), channel()),
+            ]),
+            HashMap::new(),
+            vec!["input".to_string()],
+            vec!["output".to_string()],
+        )
+        .unwrap();
+        let (sender, _receiver) = mpsc::channel(4);
+        let saver = MemorySaver::new();
+        let mut loop_state = new_loop_with_saver(
+            &pregel,
+            Some(StateValue::String("start".to_string())),
+            sender,
+            saver,
+        );
+        loop_state.enter().unwrap();
+
+        assert!(loop_state.tick().unwrap());
+        loop_state.execute().unwrap();
+        loop_state.after_tick().unwrap();
+
+        assert!(loop_state.checkpoint.is_some());
+        let cp = loop_state.checkpoint.unwrap();
+        assert!(cp.channel_versions.contains_key("output"));
+    }
+
+    #[test]
+    fn after_tick_writes_pending_writes_to_checkpointer() {
+        let pregel = Pregel::new(
+            HashMap::from([(
+                "a".to_string(),
+                PregelNode::new(
+                    vec!["input".to_string()],
+                    vec!["input".to_string()],
+                    None,
+                    vec![fixed_writer(
+                        "output",
+                        StateValue::String("result".to_string()),
+                    )],
+                    Box::new(|_, _| Ok(NodeOutput::<StateValue>::None)),
+                ),
+            )]),
+            HashMap::from([
+                ("input".to_string(), channel()),
+                ("output".to_string(), channel()),
+            ]),
+            HashMap::new(),
+            vec!["input".to_string()],
+            vec!["output".to_string()],
+        )
+        .unwrap();
+        let (sender, _receiver) = mpsc::channel(4);
+        let saver = MemorySaver::new();
+        let mut loop_state = new_loop_with_saver(
+            &pregel,
+            Some(StateValue::String("start".to_string())),
+            sender,
+            saver,
+        );
+        loop_state.enter().unwrap();
+
+        assert!(loop_state.tick().unwrap());
+        loop_state.execute().unwrap();
+        loop_state.after_tick().unwrap();
+
+        // checkpoint should contain output channel from the loop step.
+        let cp = loop_state.checkpoint.as_ref().unwrap();
+        assert!(cp.channel_versions.contains_key("output"));
+
+        // checkpointer should have two checkpoints (input + loop).
+        // Access the checkpointer from loop_state to verify.
+        let saver_ref = loop_state.checkpointer.as_ref().unwrap();
+        let config = CheckpointConfig {
+            thread_id: "default".to_string(),
+            checkpoint_ns: String::new(),
+            checkpoint_id: None,
+        };
+        let tuple = saver_ref.get_tuple(&config).unwrap().unwrap();
+        // The latest checkpoint should be the loop one (step 0).
+        assert!(tuple.checkpoint.channel_versions.contains_key("output"));
+    }
+    #[test]
+    fn channel_versions_increment_on_each_update() {
+        let pregel = valid_pregel();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Number(1.0)), sender);
+        loop_state.enter().unwrap();
+
+        assert_eq!(loop_state.channel_versions.get("input"), Some(&1u64));
+    }
+
+    #[test]
+    fn enter_restores_step_and_stop_from_checkpoint_metadata() {
+        // Pre-populate a MemorySaver with a checkpoint at step 3.
+        let mut saver = MemorySaver::new();
+        let mut cp = empty_checkpoint();
+        cp.channel_versions.insert("input".to_string(), 2);
+        cp.channel_values
+            .insert("input".to_string(), StateValue::String("old".to_string()));
+        let meta = CheckpointMetadata {
+            source: CheckpointSource::Loop,
+            step: 3,
+            parents: HashMap::new(),
+        };
+        let config = CheckpointConfig {
+            thread_id: "default".to_string(),
+            checkpoint_ns: String::new(),
+            checkpoint_id: None,
+        };
+        saver
+            .put(&config, cp.clone(), meta, HashMap::new())
+            .unwrap();
+
+        // Build a loop with this checkpointer.
+        let pregel = valid_pregel();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut loop_state = PregelLoop::new(
+            &pregel,
+            Some(StateValue::String("fresh".to_string())),
+            RuntimeContext::new(()).with_checkpointer(saver),
+            sender,
+        )
+        .unwrap();
+        loop_state.enter().unwrap();
+
+        // Step should be restored from metadata: 3 + 1 = 4.
+        assert_eq!(loop_state.step, 4);
+        assert_eq!(loop_state.stop, 4 + pregel.recursion_limit + 1);
+        // versions_seen["__interrupt__"] should capture pre-resume channel versions.
+        assert!(loop_state.versions_seen.contains_key("__interrupt__"));
+        let interrupt_seen = loop_state.versions_seen.get("__interrupt__").unwrap();
+        assert_eq!(interrupt_seen.get("input"), Some(&2u64));
+    }
+
+    #[test]
+    fn enter_without_prior_checkpoint_starts_step_at_zero() {
+        let pregel = valid_pregel();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut loop_state = new_loop(&pregel, Some(StateValue::Number(1.0)), sender);
+        loop_state.enter().unwrap();
+
+        // Without a prior checkpoint, step stays at 0 (set by new()).
+        assert_eq!(loop_state.step, 0);
     }
 }
