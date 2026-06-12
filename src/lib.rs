@@ -1,4 +1,5 @@
 mod channel;
+pub mod checkpoint;
 pub mod error;
 pub mod graph;
 mod managed;
