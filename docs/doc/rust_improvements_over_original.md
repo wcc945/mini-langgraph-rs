@@ -364,3 +364,21 @@ Rust 版当前只迁移无 checkpoint 的同步主线：`tick()` 清理上一轮
 
 
 
+
+## 22. Checkpoint 数据结构用 u64 版本号，StateValue 直存，不含 async
+
+源项目 `Checkpoint` 是 Python TypedDict，`channel_versions` 用 `str | int | float` 混合类型，版本号格式为 `"001.0x3f2a"`（单调递增 + 随机后缀），`channel_values` 从 checkpoint 中抽离到 blobs 存储（因为 serde 序列化体积大），`PendingWrite` 是 `(task_id, channel, value)` 三元组，`BaseCheckpointSaver` 同时提供 `get/aput` 等 async 变体。
+
+Rust 版的取舍：
+
+- `channel_versions` 用 `HashMap<String, u64>` 替代 `ChannelVersions = dict[str, str | int | float]`。版本号是简单递增整数，不需要随机后缀。Rust 的强类型系统保证了版本号只能是整数，消除了 Python 版混合类型的运行时歧义。
+- `channel_values` 直接存在 `Checkpoint` 结构体中（`HashMap<String, StateValue>`），不需要 Python 版的 `blobs` 间接存储层。内存版没有 serde 序列化开销，直存更简洁。如果后续引入持久化 backend（sqlite/postgres），再加序列化层也不迟。
+- `PendingWrite` 用命名结构体替代 Python `(task_id, channel, value)` tuple。字段有语义名，模式匹配调试直观。
+- `CheckpointSaver` trait 只含同步方法（`get_tuple/put/put_writes/delete_thread`），不设 async 变体。内存版没有 IO，async 没有意义。后续引入 sqlite/postgres backend 时可以在独立 trait 或方法中加 async。
+- `MemorySaver` 用 `HashMap<String, HashMap<String, BTreeMap<String, (...)>>>` 三层嵌套（thread_id/namespace/checkpoint_id），`BTreeMap` 支持 `last_key_value()` 取最新 checkpoint 和有序遍历，对应 Python 版 `max(checkpoints.keys())` 语义。
+- `put_writes` 对同一 `task_id` 采用先删后加的覆盖语义，对齐 Python 版 `InMemorySaver.put_writes` 行为。
+- `CheckpointMetadata` 中不包含 `run_id` 和 `counters_since_delta_snapshot` 字段。前者对最小 runnable 没有消费方，后者属于 DeltaChannel beta 特性。
+- `create_checkpoint` 从 PregelLoop 的 live channels 快照构建新 `Checkpoint`，递增 updated_channels 中各 channel 的版本号。这个辅助函数对齐了源项目 `_checkpoint.py::create_checkpoint` 的核心逻辑，但不包含 DeltaChannel snapshot 和 durability 相关分支。
+- `empty_checkpoint` 对齐源项目 `_checkpoint.py::empty_checkpoint()`，生成所有 map 为空的初始 checkpoint。
+- PregelLoop 在 `enter()` 时从 checkpointer 加载或创建空 checkpoint，在 `after_tick()` 时保存 loop checkpoint。checkpoint 版本号递增在 `enter()` 和 `after_tick()` 更新 updated_channels 之后执行，保证版本号与 channel 状态一致。
+- 当前 checkpoint 保存路径不包含 pending_writes 持久化和 interrupt/resume 逻辑。这些属于第二阶段。
