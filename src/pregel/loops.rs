@@ -274,42 +274,6 @@ where
             }
         }
 
-        if bump_step {
-            let mut channel_names = self.channels.keys().cloned().collect::<Vec<_>>();
-            channel_names.sort();
-
-            for channel in &channel_names {
-                if updated_channels.contains(channel) {
-                    continue;
-                }
-
-                let Some(channel_state) = self.channels.get_mut(channel) else {
-                    continue;
-                };
-
-                if channel_state.is_available()
-                    && channel_state.update(Vec::new())?
-                    && channel_state.is_available()
-                {
-                    updated_channels.insert(channel.clone());
-                }
-            }
-
-            if !updated_channels
-                .iter()
-                .any(|channel| self.trigger_to_nodes.contains_key(channel))
-            {
-                for channel in channel_names {
-                    let Some(channel_state) = self.channels.get_mut(&channel) else {
-                        continue;
-                    };
-
-                    if channel_state.finish()? && channel_state.is_available() {
-                        updated_channels.insert(channel);
-                    }
-                }
-            }
-        }
 
         // Update versions_seen: record which channel versions each task has seen.
         for task in &sorted_tasks {

@@ -133,18 +133,39 @@ fn now_rfc3339() -> String {
     let d = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    let secs = d.as_secs();
+    let secs = d.as_secs() as i64;
     let nanos = d.subsec_nanos();
-    let rem = secs % 86400;
+    let (y, mo, d, h, mi, s) = unix_to_calendar(secs);
     format!(
-        "{:04}-01-01T{:02}:{:02}:{:02}.{:09}Z",
-        1970 + secs / (365 * 86400),
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60,
-        nanos,
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
+        y, mo, d, h, mi, s, nanos,
     )
 }
+
+/// Convert Unix timestamp (seconds since epoch) to (year, month, day, hour, min, sec).
+/// Uses the Howard Hinnant algorithm with proper leap-year handling.
+fn unix_to_calendar(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86400);
+    let tod = secs.rem_euclid(86400);
+    let hour = (tod / 3600) as u32;
+    let min = ((tod % 3600) / 60) as u32;
+    let sec = (tod % 60) as u32;
+
+    // days since civil epoch 0000-03-01
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+
+    (year, month, day, hour, min, sec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -231,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if let Some(StateValue::Number(rc)) = fields.get("review_count") {
-            println!("Total review attempts: {}", *rc as usize + 1);
+            println!("Total rejections: {}", *rc as usize);
         }
     }
 
