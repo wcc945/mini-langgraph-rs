@@ -673,3 +673,89 @@ fn command_outputs_are_reported_as_unsupported() {
 
     assert!(matches!(error, GraphError::UnsupportedPregelCommand));
 }
+
+// --- Checkpointer integration tests ---
+
+use mini_langgraph_rs::checkpoint::MemorySaver;
+
+fn graph_with_checkpointer() -> (StateGraph<StateValue, StateValue>, MemorySaver) {
+    let graph = StateGraph::with_channels(["value"]);
+    (graph, MemorySaver::new())
+}
+
+#[test]
+fn invoke_with_checkpointer_saves_state_between_runs() {
+    let mut graph = graph_with_value_channel();
+    graph
+        .add_node(
+            "inc",
+            Box::new(|state: &StateValue, _| {
+                let cur = object_field(state, "value")
+                    .and_then(|v| match v {
+                        StateValue::Number(n) => Some(*n as i64),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                Ok(NodeOutput::Update(update_value(StateValue::Number(
+                    (cur + 1) as f64,
+                ))))
+            }),
+        )
+        .unwrap();
+    graph.set_entry_point("inc").unwrap();
+    graph.set_finish_point("inc").unwrap();
+    let compiled = graph.compile().unwrap();
+    let saver = MemorySaver::new();
+    let ctx = RuntimeContext::new(()).with_checkpointer(saver);
+
+    // First run: start from 0, end at 1.
+    let output = compiled.invoke(Some(StateValue::Null), ctx).unwrap();
+    assert_eq!(output, StateValue::Number(1.0));
+}
+
+#[test]
+fn invoke_with_checkpointer_preserves_output_type() {
+    let mut graph = graph_with_value_channel();
+    graph
+        .add_node(
+            "tag",
+            Box::new(|_, _| {
+                Ok(NodeOutput::Update(update_value(StateValue::String(
+                    "tagged".to_string(),
+                ))))
+            }),
+        )
+        .unwrap();
+    graph.set_entry_point("tag").unwrap();
+    graph.set_finish_point("tag").unwrap();
+    let compiled = graph.compile().unwrap();
+    let ctx = RuntimeContext::new(()).with_checkpointer(MemorySaver::new());
+
+    let output = compiled.invoke(Some(StateValue::Null), ctx).unwrap();
+
+    assert_eq!(output, StateValue::String("tagged".to_string()));
+}
+
+#[test]
+fn stream_with_checkpointer_emits_values() {
+    let mut graph = graph_with_value_channel();
+    graph
+        .add_node(
+            "step",
+            Box::new(|_, _| Ok(NodeOutput::Update(update_value(StateValue::Number(42.0))))),
+        )
+        .unwrap();
+    graph.set_entry_point("step").unwrap();
+    graph.set_finish_point("step").unwrap();
+    let compiled = graph.compile().unwrap();
+    let ctx = RuntimeContext::new(()).with_checkpointer(MemorySaver::new());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut receiver = compiled.stream(Some(StateValue::Null), ctx).unwrap();
+
+        let item = receiver.recv().await.unwrap().unwrap();
+        assert_eq!(item.mode, StreamMode::Values);
+        assert_eq!(item.data, StateValue::Number(42.0));
+    });
+}
