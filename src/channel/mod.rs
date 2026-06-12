@@ -12,16 +12,16 @@ pub enum StateValue {
     Object(HashMap<String, StateValue>),
 }
 
-pub(crate) type DynChannel =
+pub type DynChannel =
     dyn BaseChannel<Value = StateValue, Update = StateValue, Checkpoint = StateValue>;
 
-pub(crate) mod binop;
+pub mod binop;
 pub(crate) mod channel_writer;
 pub(crate) mod ephemeral_value;
-pub(crate) mod last_value;
+pub mod last_value;
 pub(crate) mod named_barrier_value;
 
-pub(crate) trait BaseChannel: Send + Sync {
+pub trait BaseChannel: Send + Sync {
     type Value;
     type Update;
     type Checkpoint;

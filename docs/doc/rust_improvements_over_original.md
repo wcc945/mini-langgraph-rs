@@ -186,6 +186,8 @@ trait StateSchema {
 
 为了让 crate-level 集成测试和 MVP 用户能在不接触内部 channel trait 的前提下构建可运行图，Rust 版额外提供 `StateGraph::with_channels([...])`。该方法把字段名转换为内部 `LastValue` channel，作为 typed schema / derive 宏出现前的轻量公开入口。
 
+后续 StateSchema、with_schema()、BinaryOperatorAggregate、LastValue、DynChannel、BaseChannel、ManagedValueSpec 以及 StateGraph.channels / StateGraph.managed 字段已进一步公开为外部 API，便于用户在 example 和集成场景中手动装配自定义 reducer 和 channel 类型。
+
 这个取舍先达成源项目 `_add_schema(self.state_schema)` 的最小效果，但字段名和 channel 类型仍由用户显式声明。等后续出现独立 `InputT`、`OutputT`、节点输入投影或宏生成 schema 时，再扩展 schema trait 或追加 derive 宏。
 
 ## 10. ChannelWriter 先收敛为同步字段写入层

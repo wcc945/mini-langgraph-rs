@@ -17,6 +17,7 @@ type NamespaceStorage =
 
 type WriteKey = (String, String, String);
 
+#[derive(Clone)]
 pub struct MemorySaver {
     /// thread_id -> namespace -> checkpoint_id -> (checkpoint, metadata, parent_id)
     storage: HashMap<String, NamespaceStorage>,

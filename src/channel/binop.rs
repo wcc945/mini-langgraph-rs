@@ -6,13 +6,13 @@ use crate::error::GraphError;
 type StateValueReducer =
     dyn Fn(StateValue, StateValue) -> Result<StateValue, GraphError> + Send + Sync + 'static;
 
-pub(crate) struct BinaryOperatorAggregate {
+pub struct BinaryOperatorAggregate {
     value: Option<StateValue>,
     reducer: Arc<StateValueReducer>,
 }
 
 impl BinaryOperatorAggregate {
-    pub(crate) fn new(
+    pub fn new(
         reducer: impl Fn(StateValue, StateValue) -> Result<StateValue, GraphError>
         + Send
         + Sync

@@ -91,6 +91,102 @@ let output = compiled.invoke(Some(StateValue::Null), RuntimeContext::default())?
 assert_eq!(output, StateValue::String("routed".to_string()));
 ```
 
+### 并行 Fan-out + Join (Waiting Edge)
+
+```rust
+use std::collections::HashMap;
+use mini_langgraph_rs::{NodeOutput, RuntimeContext, StateGraph, StateValue};
+
+let mut graph: StateGraph<StateValue, StateValue> =
+    StateGraph::with_channels(["a_out", "b_out", "merged"]);
+
+graph.add_node("split", Box::new(|_, _| Ok(NodeOutput::None)))?;
+graph.add_node("worker_a", Box::new(|_, _| {
+    Ok(NodeOutput::Update(StateValue::Object(HashMap::from([(
+        "a_out".to_string(), StateValue::String("A".to_string()),
+    )]))))
+}))?;
+graph.add_node("worker_b", Box::new(|_, _| {
+    Ok(NodeOutput::Update(StateValue::Object(HashMap::from([(
+        "b_out".to_string(), StateValue::String("B".to_string()),
+    )]))))
+}))?;
+graph.add_node("join", Box::new(|_, _| {
+    Ok(NodeOutput::Update(StateValue::Object(HashMap::from([(
+        "merged".to_string(), StateValue::String("done".to_string()),
+    )]))))
+}))?;
+
+graph.set_entry_point("split")?;
+// Fan-out: split -> 两路并行
+graph.add_edge("split", "worker_a")?;
+graph.add_edge("split", "worker_b")?;
+// Fan-in: 两路都完成后触发 join (waiting edge)
+graph.add_edge(["worker_a", "worker_b"], "join")?;
+graph.set_finish_point("join")?;
+
+let compiled = graph.compile()?;
+let output = compiled.invoke(Some(StateValue::Null), RuntimeContext::default())?;
+assert_eq!(
+    output,
+    StateValue::Object(HashMap::from([
+        ("a_out".to_string(), StateValue::String("A".to_string())),
+        ("b_out".to_string(), StateValue::String("B".to_string())),
+        ("merged".to_string(), StateValue::String("done".to_string())),
+    ]))
+);
+```
+
+### 自定义 Reducer (BinaryOperatorAggregate)
+
+```rust
+use std::collections::HashMap;
+use mini_langgraph_rs::{
+    BinaryOperatorAggregate, DynChannel, GraphError, LastValue, NodeOutput,
+    RuntimeContext, StateGraph, StateValue,
+};
+
+// 自定义 reducer：累加数字
+fn sum_reducer(left: StateValue, right: StateValue) -> Result<StateValue, GraphError> {
+    match (left, right) {
+        (StateValue::Number(a), StateValue::Number(b)) => Ok(StateValue::Number(a + b)),
+        _ => Err(GraphError::InvalidChannelUpdate("expected numbers".to_string())),
+    }
+}
+
+// 手动装配 channels：counter 使用 BinaryOperatorAggregate
+let mut channels: HashMap<String, Box<DynChannel>> = HashMap::new();
+channels.insert("counter".to_string(), Box::new(BinaryOperatorAggregate::new(sum_reducer)));
+
+let mut graph: StateGraph<StateValue, StateValue> = StateGraph::new();
+graph.channels = channels;
+
+graph.add_node("add_1", Box::new(|_, _| {
+    Ok(NodeOutput::Update(StateValue::Object(HashMap::from([(
+        "counter".to_string(), StateValue::Number(1.0),
+    )]))))
+}))?;
+graph.add_node("add_2", Box::new(|_, _| {
+    Ok(NodeOutput::Update(StateValue::Object(HashMap::from([(
+        "counter".to_string(), StateValue::Number(2.0),
+    )]))))
+}))?;
+
+graph.set_entry_point("add_1")?;
+graph.add_edge("add_1", "add_2")?;
+graph.set_finish_point("add_2")?;
+
+let compiled = graph.compile()?;
+let output = compiled.invoke(Some(StateValue::Null), RuntimeContext::default())?;
+// counter 的两次写入被 reducer 合并：1 + 2 = 3
+assert_eq!(
+    output,
+    StateValue::Object(HashMap::from([(
+        "counter".to_string(), StateValue::Number(3.0)
+    )]))
+);
+```
+
 ### 带 checkpoint 的执行
 
 ```rust
@@ -172,50 +268,31 @@ cargo bench
 
 Rust 端 invoke 耗时基本恒定（73-165 us），不随节点数线性增长——每个 superstep 内部开销远大于状态拷贝开销。Python 端 invoke 随节点数近似线性增长（解释执行 + 动态类型开销），因此节点越多加速越明显。stream 和 checkpoint 场景中 Rust 的内存分配与 I/O 优势进一步放大差距。
 
-## Example: Plan-Execute-Review Agent
+## Example: Code Review Pipeline Agent
 
-`examples/plan_execute_review.rs` 是一个多步骤 agent，展示条件边实现的重试循环和跨轮次状态累积。
+`examples/plan_execute_review.rs` 是一个代码审查流水线 agent，同时演示三个核心功能：checkpoint 持久化、waiting edge（join）并行汇聚、以及 BinaryOperatorAggregate 自定义 reducer。
 
 ### 图拓扑
 
 ```
-START
-  |
-  v
- plan ---> execute ---> review
-             ^            |
-             |   retry    | 条件边判定
-             +------------+
-                            | approved
-                            v
-                           END
+                         +-- security_check --+
+START --> receive_pr ----+-- style_check    --+-- aggregate_report --> END
+                         +-- perf_check     --+
 ```
+
+- `receive_pr` 接收 PR 内容，fan-out 到三路并行审查
+- 三路审查（安全/风格/性能）并行执行，各自产出 findings 列表
+- findings channel 使用 `BinaryOperatorAggregate`，自定义 reducer 将各路的列表合并为一个
+- 三路都完成后（waiting edge），`aggregate_report` 汇总最终报告
+- 全程启用 `MemorySaver` checkpoint
 
 ### 状态字段
 
-| 字段 | 类型 | 说明 |
+| 字段 | Channel 类型 | 说明 |
 | --- | --- | --- |
-| `task` | String | 总任务描述 ("write a blog post") |
-| `plan` | List[String] | 子任务列表 (research, draft, polish) |
-| `current_step` | Number | 当前执行到的步骤索引 |
-| `results` | List[String] | 已完成步骤的结果 |
-| `review_count` | Number | 已审核次数 |
-
-### 节点逻辑
-
-| 节点 | 职责 |
-| --- | --- |
-| **plan** | 将 task 拆为 3 个子任务，初始化 current_step=0、results=[]、review_count=0 |
-| **execute** | 取 plan[current_step] 生成 "completed: {subtask}"，追加到 results，current_step+1 |
-| **review** | 全部步骤完成后基于 review_count 判定：<2 则重置 current_step=0 并递增 review_count（触发重试），>=2 则批准 |
-
-review 节点的条件边 `decide` 读取 pre-tick 状态做路由决策：
-
-- `current_step < plan.len()` --- 路由到 execute（继续下一步）
-- `current_step >= plan.len() && review_count >= 2` --- 路由到 END（批准）
-- 否则 --- 路由到 execute（重试）
-
-review 节点的 StateUpdate（重置 current_step、递增 review_count）与 path_fn 的路由决策共享同一份 pre-tick 状态快照，保证节点行为与路由一致。
+| `pr_content` | LastValue | 待审查的 PR 源代码 |
+| `findings` | BinaryOperatorAggregate | 各审查节点发现的问题列表（reducer: 列表拼接） |
+| `report` | LastValue | 最终汇总报告 |
 
 ### 运行
 
@@ -223,7 +300,11 @@ review 节点的 StateUpdate（重置 current_step、递增 review_count）与 p
 cargo run --example plan_execute_review
 ```
 
-输出 12 个 superstep 的完整工作流：3 个子任务 x 3 轮审核（2 次重试 + 1 次最终批准），最终打印 9 条累积结果。
+输出展示：
+- superstep 2 中三路审查在同一轮并行执行（fan-out + waiting edge 生效）
+- superstep 3 中 aggregate_report 触发（join 生效）
+- 最终 findings 列表包含 3 个检查器的共 7 条发现（reducer 合并生效）
+- checkpoint 在 stream 和 invoke 两次执行中均启用
 
 ## API 概览
 
@@ -233,14 +314,25 @@ cargo run --example plan_execute_review
 | --- | --- |
 | `StateGraph::new()` | 创建空 builder，后续手动添加 channel |
 | `StateGraph::with_channels(["a", "b"])` | 用字段名创建，自动装配 `LastValue` channel |
+| `StateGraph::with_schema()` | 从 `StateSchema` trait 自动生成 channels 和 managed values |
 | `add_node(name, func)` | 注册节点，函数签名 `(&StateT, &RuntimeContext<ContextT>) -> Result<NodeOutput<UpdateT>, GraphError>` |
-| `add_edge(from, to)` | 添加普通边。`from` 支持 `"a"`、`["a", "b"]`（join 边）、`vec!["a", "b"]` |
+| `add_edge(from, to)` | 添加普通边。`from` 支持 `"a"`（fan-out）、`["a", "b"]`（join / waiting edge） |
 | `add_conditional_edges(from, name, path_fn, ends)` | 添加条件边，按路由结果分发到不同目标 |
 | `add_sequence([(name, func), ...])` | 顺序注册节点并自动连接 |
 | `set_entry_point(key)` | 从 `START` 连接到节点 |
 | `set_finish_point(key)` | 从节点连接到 `END` |
 | `set_conditional_entry_point(name, path_fn, ends)` | 在入口处使用条件路由 |
 | `compile()` | 消费 builder，返回 `CompiledStateGraph`（编译后不可再修改） |
+
+### Channel 装配
+
+| 方式 | 说明 |
+| --- | --- |
+| `StateGraph::with_channels(["a", "b"])` | 每个字段自动装配 `LastValue` |
+| `graph.channels = custom_map` | 手动注入 `HashMap<String, Box<DynChannel>>`，可使用任意 channel 类型 |
+| `BinaryOperatorAggregate::new(reducer)` | 创建带自定义 reducer 的聚合 channel |
+| `LastValue::new()` | 创建标准的 last-value-wins channel |
+| `StateSchema` trait | 实现 trait 自动装配 channels + managed values |
 
 ### 运行时执行
 
@@ -267,6 +359,10 @@ let ctx = RuntimeContext::new(user_context)       // 注入用户上下文
 - `NodeOutput<UpdateT>` --- 节点返回值：`Update` / `Command` / `Commands` / `None`
 - `PregelStreamItem` --- 流式输出项：`{ step, mode, data }`
 - `GraphError` --- 统一错误类型，覆盖构图、channel、运行时三类错误
+- `BinaryOperatorAggregate` --- 自定义 reducer channel（多写入自动合并）
+- `LastValue` --- last-value-wins channel
+- `DynChannel` / `BaseChannel` --- channel trait object 和 trait 定义
+- `StateSchema` --- 类型化 state schema trait（自动生成 channels + managed values）
 
 ## 功能对比
 
@@ -279,7 +375,7 @@ let ctx = RuntimeContext::new(user_context)       // 注入用户上下文
 | `START` / `END` 虚拟节点 | ✓ | ✓ |
 | 显式节点注册 `add_node(name, func)` | ✓ | ✓ |
 | 自动推断节点名 `add_node(func)` | ✓ | ✗ |
-| `state_schema` / `context_schema` / `input_schema` / `output_schema` | ✓ | △（`with_channels` 字段名入口，无类型推导/derive 宏） |
+| `state_schema` / `context_schema` / `input_schema` / `output_schema` | ✓ | △（`with_channels` 字段名入口；`StateSchema` trait 已公开，无 derive 宏） |
 | 普通边 `add_edge(from, to)` | ✓ | ✓（`into()` 重载：`"a"` 或 `["a","b"]`） |
 | 多起点 join 边 `add_edge([a, b], c)` | ✓ | ✓ |
 | 条件边 `add_conditional_edges(from, name, path_fn, ends)` | ✓ | ✓ |
@@ -308,12 +404,12 @@ let ctx = RuntimeContext::new(user_context)       // 注入用户上下文
 | `Durability` (sync / async / exit) | ✓ | ✗ |
 | **状态管理** | | |
 | `LastValue` 默认 reducer | ✓ | ✓ |
-| `BinaryOperatorAggregate` 自定义聚合 | ✓ | ✓ |
+| `BinaryOperatorAggregate` 自定义聚合 | ✓ | ✓（已公开，可通过 `graph.channels` 手动装配） |
 | `EphemeralValue` 调度信号 | ✓ | ✓ |
 | `NamedBarrierValue` / `NamedBarrierValueAfterFinish` join 屏障 | ✓ | ✓（无 AfterFinish 变体） |
 | `LastValueAfterFinish` | ✓ | ✗ |
 | `ChannelWriter` 写入组装（entry / tuple entry） | ✓ | ✓ |
-| `StateSchema` trait 类型推导 | ✓ | ✓（crate 内部 trait，无 derive 宏） |
+| `StateSchema` trait 类型推导 | ✓ | ✓（已公开，无 derive 宏） |
 | 从 annotated type 字段自动推断 schema | ✓ | ✗ |
 | `Overwrite` 绕过 reducer 直接写入 | ✓ | ✗ |
 | `StateUpdate` / `StateSnapshot` 状态快照 | ✓ | ✗ |
@@ -404,7 +500,7 @@ cargo clippy --all-targets --all-features
 | [可恢复执行与持久化](docs/doc/implementation_scope_persistence.md) | checkpoint 数据结构、MemorySaver、PregelLoop 集成 |
 | [暂不实现范围](docs/doc/implementation_scope_out_of_scope.md) | 不在当前范围的平台与高级能力 |
 | [Rust 版改进记录](docs/doc/rust_improvements_over_original.md) | 相对源项目的设计取舍与 Rust 化改造 |
-| [Plan-Execute-Review Agent](examples/plan_execute_review.rs) | 多步骤 agent example：条件边重试循环与状态累积 |
+| [Code Review Pipeline Agent](examples/plan_execute_review.rs) | 完整 agent example：checkpoint + waiting edge + reducer |
 
 ## 参考项目
 

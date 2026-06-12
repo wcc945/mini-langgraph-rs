@@ -2,7 +2,7 @@ mod branch;
 mod compiled;
 pub mod consts;
 pub(crate) mod node;
-mod schema;
+pub mod schema;
 mod state;
 mod waiting_edge;
 

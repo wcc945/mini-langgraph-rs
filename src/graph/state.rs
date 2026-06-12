@@ -16,8 +16,8 @@ pub struct StateGraph<StateT, UpdateT, ContextT = (), InputT = StateT, OutputT =
     edges: HashSet<(String, String)>,
     branches: HashMap<String, HashMap<String, BranchSpec<StateT, ContextT>>>,
     waiting_edges: HashSet<WaitingEdgeSpec>,
-    channels: HashMap<String, Box<DynChannel>>,
-    managed: HashMap<String, Box<dyn ManagedValueSpec>>,
+    pub channels: HashMap<String, Box<DynChannel>>,
+    pub managed: HashMap<String, Box<dyn ManagedValueSpec>>,
     _marker: PhantomData<(InputT, OutputT)>,
 }
 
@@ -52,6 +52,12 @@ where
 {
     fn into_edge_starts(self) -> Vec<String> {
         self.into_iter().map(Into::into).collect()
+    }
+}
+
+impl<StateT, UpdateT, ContextT, InputT, OutputT> Default for StateGraph<StateT, UpdateT, ContextT, InputT, OutputT> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -91,7 +97,7 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
 where
     StateT: StateSchema,
 {
-    pub(crate) fn with_schema() -> Self {
+    pub fn with_schema() -> Self {
         let mut graph = Self::new();
         graph.channels = StateT::channels();
         graph.managed = StateT::managed();

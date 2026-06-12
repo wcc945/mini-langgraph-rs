@@ -1,4 +1,4 @@
-pub(crate) trait ManagedValueSpec: Send + Sync {
+pub trait ManagedValueSpec: Send + Sync {
     fn copy_box(&self) -> Box<dyn ManagedValueSpec>;
 }
 

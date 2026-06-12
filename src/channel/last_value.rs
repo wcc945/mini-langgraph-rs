@@ -1,12 +1,18 @@
 use crate::channel::{BaseChannel, StateValue};
 use crate::error::GraphError;
 
-pub(crate) struct LastValue {
+pub struct LastValue {
     value: Option<StateValue>,
 }
 
+impl Default for LastValue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LastValue {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self { value: None }
     }
 }

@@ -139,9 +139,8 @@ where
             // Restore channel values from checkpoint.
             if let Some(ref cp) = self.checkpoint {
                 for (name, value) in &cp.channel_values {
-                    if let Some(channel) = self.channels.get_mut(name) {
-                        if channel.update(vec![value.clone()]).is_ok() {}
-                    }
+                    if let Some(channel) = self.channels.get_mut(name)
+                        && channel.update(vec![value.clone()]).is_ok() {}
                 }
                 self.channel_versions = cp.channel_versions.clone();
                 self.versions_seen = cp.versions_seen.clone();
@@ -281,7 +280,7 @@ where
                 let seen = self
                     .versions_seen
                     .entry(task.name.clone())
-                    .or_insert_with(HashMap::new);
+                    .or_default();
                 for trigger in &task.triggers {
                     if let Some(&version) = self.channel_versions.get(trigger) {
                         seen.insert(trigger.clone(), version);
@@ -459,8 +458,8 @@ where
         let pending_writes = std::mem::take(&mut self.pending_writes);
 
         // Write pending writes to checkpointer if present (per task).
-        if let Some(ref mut saver) = self.checkpointer {
-            if let Some(ref config) = self.checkpoint_config {
+        if let Some(ref mut saver) = self.checkpointer
+            && let Some(ref config) = self.checkpoint_config {
                 for task in &pending_writes {
                     let writes: Vec<crate::checkpoint::PendingWrite> = task
                         .writes
@@ -476,7 +475,6 @@ where
                     }
                 }
             }
-        }
 
         let updated_channels = self.apply_writes(&pending_writes)?;
         let stream_channels = self

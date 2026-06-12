@@ -35,7 +35,7 @@ impl<StateT, ContextT> BranchSpec<StateT, ContextT> {
                 if let Some(ends) = &self.ends {
                     ends.get(&key)
                         .cloned()
-                        .ok_or_else(|| GraphError::InvalidBranchTarget(key))
+                        .ok_or(GraphError::InvalidBranchTarget(key))
                 } else {
                     Ok(key)
                 }
