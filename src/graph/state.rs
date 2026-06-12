@@ -91,7 +91,6 @@ impl<StateT, UpdateT, ContextT, InputT, OutputT>
     }
 }
 
-#[allow(private_bounds)]
 impl<StateT, UpdateT, ContextT, InputT, OutputT>
     StateGraph<StateT, UpdateT, ContextT, InputT, OutputT>
 where
