@@ -1,3 +1,4 @@
+use crate::checkpoint::MemorySaver;
 use crate::pregel::pregel::StreamMode;
 
 /// Run-scoped dependencies exposed to graph nodes.
@@ -7,6 +8,7 @@ use crate::pregel::pregel::StreamMode;
 pub struct RuntimeContext<ContextT> {
     pub context: ContextT,
     pub stream_mode: Option<StreamMode>,
+    pub checkpointer: Option<MemorySaver>,
 }
 
 impl<ContextT> RuntimeContext<ContextT> {
@@ -14,11 +16,17 @@ impl<ContextT> RuntimeContext<ContextT> {
         Self {
             context,
             stream_mode: None,
+            checkpointer: None,
         }
     }
 
     pub fn with_stream_mode(mut self, stream_mode: StreamMode) -> Self {
         self.stream_mode = Some(stream_mode);
+        self
+    }
+
+    pub fn with_checkpointer(mut self, checkpointer: MemorySaver) -> Self {
+        self.checkpointer = Some(checkpointer);
         self
     }
 }
@@ -52,5 +60,38 @@ mod tests {
         let context = RuntimeContext::new(7);
 
         assert_eq!(read(&context), 7);
+    }
+
+    #[test]
+    fn runtime_context_accepts_checkpointer() {
+        let context = RuntimeContext::new(()).with_checkpointer(MemorySaver::new());
+
+        assert!(context.checkpointer.is_some());
+        assert!(context.stream_mode.is_none());
+    }
+    #[test]
+    fn default_context_has_no_checkpointer() {
+        let context = RuntimeContext::<()>::default();
+        assert!(context.checkpointer.is_none());
+    }
+
+    #[test]
+    fn with_checkpointer_and_stream_mode_chaining() {
+        let context = RuntimeContext::new(42)
+            .with_stream_mode(StreamMode::Updates)
+            .with_checkpointer(MemorySaver::new());
+
+        assert_eq!(context.context, 42);
+        assert_eq!(context.stream_mode, Some(StreamMode::Updates));
+        assert!(context.checkpointer.is_some());
+    }
+
+    #[test]
+    fn new_context_has_neither_checkpointer_nor_stream_mode() {
+        let context = RuntimeContext::new("data");
+
+        assert_eq!(context.context, "data");
+        assert!(context.checkpointer.is_none());
+        assert!(context.stream_mode.is_none());
     }
 }
